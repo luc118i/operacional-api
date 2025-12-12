@@ -17,7 +17,7 @@ const allowedOrigins = [
   "http://localhost:3000",
   "http://localhost:5173",
   "http://localhost:4173",
-  "https://operacional-app.vercel.ap",
+  "https://operacional-app.vercel.app",
 ];
 
 if (process.env.FRONTEND_URL) {
@@ -27,8 +27,13 @@ if (process.env.FRONTEND_URL) {
 app.use(
   cors({
     origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+    credentials: true,
   })
 );
+
+app.options("*", cors());
 
 app.use(express.json());
 
