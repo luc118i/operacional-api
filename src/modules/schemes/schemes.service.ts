@@ -13,6 +13,8 @@ import type {
 
 import type { SchemePoint } from "../schemePoints/schemePoints.types";
 import { getSchemePointsBySchemeId } from "../schemePoints/schemePoints.service";
+import { evaluateSchemePoints } from "../schemePoints/schemePoints.rules";
+import { buildRulesEvaluation } from "../schemePoints/schemePoints.evaluation";
 
 const RULE_SUPPORT_KM = 495; // ponto de apoio (ex.: 880 km / 495 = 2)
 const LONG_SEGMENT_KM = 200; // alerta de trecho muito longo
@@ -133,6 +135,12 @@ export async function getAllSchemesWithSummary(): Promise<SchemeWithSummary[]> {
         rulesStatus: {
           status: "OK",
           message: "Resumo não disponível para este esquema",
+        },
+        rulesEvaluation: {
+          totalAlertas: 0,
+          totalSugestoes: 0,
+          statusGeral: "OK",
+          mensagem: "Resumo não disponível (sem avaliação de regras)",
         },
       };
     } else {
@@ -373,151 +381,209 @@ export async function deleteScheme(id: string): Promise<boolean> {
 export async function getSchemeSummary(
   schemeId: string
 ): Promise<SchemeSummary | null> {
-  // 1) Buscar o esquema
-  const { data: scheme, error: schemeError } = await supabase
-    .from("schemes")
-    .select("*")
-    .eq("id", schemeId)
-    .single();
+  try {
+    // 1) Buscar o esquema
+    const { data: scheme, error: schemeError } = await supabase
+      .from("schemes")
+      .select("*")
+      .eq("id", schemeId)
+      .single();
 
-  if (schemeError) {
-    if ((schemeError as any).code === "PGRST116") {
-      return null;
+    if (schemeError) {
+      if ((schemeError as any).code === "PGRST116") return null;
+      console.error("[getSchemeSummary] erro ao buscar scheme:", schemeError);
+      throw new Error("Erro ao buscar esquema operacional");
     }
-    console.error("[getSchemeSummary] erro ao buscar scheme:", schemeError);
-    throw new Error("Erro ao buscar esquema operacional");
-  }
 
-  // 2) Buscar os pontos do esquema
-  const { data: points, error: pointsError } = await supabase
-    .from("scheme_points")
-    .select("*")
-    .eq("scheme_id", schemeId)
-    .order("ordem", { ascending: true });
+    // 2) Buscar os pontos do esquema
+    const { data: points, error: pointsError } = await supabase
+      .from("scheme_points")
+      .select("*")
+      .eq("scheme_id", schemeId)
+      .order("ordem", { ascending: true });
 
-  if (pointsError) {
-    console.error(
-      "[getSchemeSummary] erro ao buscar scheme_points:",
-      pointsError
+    if (pointsError) {
+      console.error(
+        "[getSchemeSummary] erro ao buscar scheme_points:",
+        pointsError
+      );
+      throw new Error("Erro ao buscar pontos do esquema operacional");
+    }
+
+    const schemePoints = points ?? [];
+
+    // Se não tiver pontos, devolve um resumo "zerado"
+    if (schemePoints.length === 0) {
+      return createEmptySummary(scheme);
+    }
+
+    // 3) Cálculos principais
+    const totalKm = calculateTotalKm(schemePoints);
+    const totalTravelMinutes = calculateTotalTravelMinutes(schemePoints);
+    const totalStopMinutes = calculateTotalStopMinutes(schemePoints);
+    const totalDurationMinutes = totalTravelMinutes + totalStopMinutes;
+
+    const averageSpeedKmH = calculateAverageSpeedKmH(
+      totalKm,
+      totalTravelMinutes
     );
-    throw new Error("Erro ao buscar pontos do esquema operacional");
+
+    // 4) Contar por tipo (PD, PA, TM, etc.)
+    const countsByType = countPointsByType(schemePoints);
+
+    // 5) Paradas esperadas pela regra de 495 km (ponto de apoio)
+    const expectedStopsValue = calculateExpectedStopsValue(totalKm);
+
+    // 6) Trechos longos (> 200 km sem parada)
+    const longSegmentsCount = countLongSegments(schemePoints);
+
+    // 7) Status das regras
+    const rulesStatus = determineRulesStatus(longSegmentsCount);
+
+    const totalStops = schemePoints.length;
+    const totalParadas = totalStops;
+    const totalPontos = countsByType["PA"] ?? 0;
+
+    const evaluations = evaluateSchemePoints(schemePoints);
+    const rulesEvaluation = buildRulesEvaluation(evaluations);
+
+    return createSummary(
+      scheme,
+      totalKm,
+      totalTravelMinutes,
+      totalStopMinutes,
+      totalDurationMinutes,
+      averageSpeedKmH,
+      countsByType,
+      longSegmentsCount,
+      expectedStopsValue,
+      totalStops,
+      totalParadas,
+      totalPontos,
+      rulesStatus,
+      rulesEvaluation
+    );
+  } catch (error) {
+    console.error("[getSchemeSummary] erro inesperado:", error);
+    throw new Error("Erro inesperado ao calcular resumo do esquema");
   }
+}
 
-  const schemePoints = (points ?? []) as SchemePoint[];
+// Funções auxiliares para separar a lógica
 
-  // Se não tiver pontos, devolve um resumo "zerado"
-  if (schemePoints.length === 0) {
-    return {
-      schemeId: scheme.id,
-      schemeCodigo: (scheme as any).codigo ?? "",
-      schemeNome: (scheme as any).nome ?? "",
+function createEmptySummary(scheme: any): SchemeSummary {
+  return {
+    schemeId: scheme.id,
+    schemeCodigo: scheme.codigo ?? "",
+    schemeNome: scheme.nome ?? "",
 
+    totalKm: 0,
+    totalStops: 0,
+    totalParadas: 0,
+    totalPontos: 0,
+
+    expectedStops: {
+      value: 0,
       totalKm: 0,
-      totalStops: 0,
-      totalParadas: 0,
-      totalPontos: 0,
+      ruleKm: RULE_SUPPORT_KM,
+    },
 
-      expectedStops: {
-        value: 0,
-        totalKm: 0,
-        ruleKm: RULE_SUPPORT_KM,
-      },
+    totalTravelMinutes: 0,
+    totalStopMinutes: 0,
+    totalDurationMinutes: 0,
+    averageSpeedKmH: null,
 
-      totalTravelMinutes: 0,
-      totalStopMinutes: 0,
-      totalDurationMinutes: 0,
-      averageSpeedKmH: null,
+    countsByType: {},
+    longSegmentsCount: 0,
 
-      countsByType: {},
-      longSegmentsCount: 0,
-      rulesStatus: {
-        status: "OK",
-        message: "Sem pontos cadastrados para este esquema",
-      },
-    };
-  }
+    rulesStatus: {
+      status: "OK",
+      message: "Sem pontos cadastrados para este esquema",
+    },
 
-  // 3) Cálculos principais
-  const totalKm = schemePoints.reduce(
-    (sum, p) => sum + (p.distancia_km ?? 0),
-    0
-  );
+    rulesEvaluation: {
+      totalAlertas: 0,
+      totalSugestoes: 0,
+      statusGeral: "OK",
+      mensagem: "Sem regras avaliadas",
+    },
+  };
+}
 
-  const totalTravelMinutes = schemePoints.reduce(
+function calculateTotalKm(schemePoints: SchemePoint[]): number {
+  return schemePoints.reduce((sum, p) => sum + (p.distancia_km ?? 0), 0);
+}
+
+function calculateTotalTravelMinutes(schemePoints: SchemePoint[]): number {
+  return schemePoints.reduce(
     (sum, p) => sum + (p.tempo_deslocamento_min ?? 0),
     0
   );
+}
 
-  const totalStopMinutes = schemePoints.reduce(
-    (sum, p) => sum + (p.tempo_no_local_min ?? 0),
-    0
-  );
+function calculateTotalStopMinutes(schemePoints: SchemePoint[]): number {
+  return schemePoints.reduce((sum, p) => sum + (p.tempo_no_local_min ?? 0), 0);
+}
 
-  const totalDurationMinutes = totalTravelMinutes + totalStopMinutes;
+function calculateAverageSpeedKmH(
+  totalKm: number,
+  totalTravelMinutes: number
+): number | null {
+  return totalTravelMinutes > 0
+    ? Number((totalKm / (totalTravelMinutes / 60)).toFixed(1))
+    : null;
+}
 
-  const averageSpeedKmH =
-    totalTravelMinutes > 0
-      ? Number((totalKm / (totalTravelMinutes / 60)).toFixed(1))
-      : null;
+function countPointsByType(
+  schemePoints: SchemePoint[]
+): Record<string, number> {
+  const counts: Record<string, number> = {};
+  schemePoints.forEach((p) => {
+    if (p.tipo) counts[p.tipo] = (counts[p.tipo] ?? 0) + 1;
+  });
+  return counts;
+}
 
-  // 4) Contar por tipo (PD, PA, TM, etc.)
-  // -----------------------------------------
-  // Cálculo de paradas (totalStops) e PCs (totalPcs)
-  // -----------------------------------------
-  //
-  // - totalStops:
-  //   Conta todas as paradas operacionais da viagem.
-  //   Tipos que entram na contagem:
-  //     * PE  (embarque)
-  //     * PD  (desembarque)
-  //     * PL  (ponto livre / operacional)   [opcional excluir pré-viagem]
-  //     * PP  (parada obrigatória / descanso)
-  //     * PA  (ponto de apoio / alimentação)
-  //     * TMJ (troca de motorista em jornada)
-  //
-  // - totalPcs:
-  //   Conta apenas Pontos de Apoio (PC).
-  //   Por definição de negócio, PC = pontos com tipo === "PA".
-  //   Tipos que NÃO entram: PE, PD, PL, PP, TMJ.
-  //
+function calculateExpectedStopsValue(totalKm: number): number {
+  return totalKm > 0 ? Math.ceil(totalKm / RULE_SUPPORT_KM) : 0;
+}
 
-  const countsByType: Record<string, number> = {};
-  for (const p of schemePoints) {
-    if (!p.tipo) continue;
-    countsByType[p.tipo] = (countsByType[p.tipo] ?? 0) + 1;
-  }
+function countLongSegments(schemePoints: SchemePoint[]): number {
+  return schemePoints.filter((p) => (p.distancia_km ?? 0) > LONG_SEGMENT_KM)
+    .length;
+}
 
-  const totalStops = schemePoints.length;
-  const totalParadas = totalStops;
-  const totalPontos = countsByType["PA"] ?? 0;
+function determineRulesStatus(
+  longSegmentsCount: number
+): SchemeSummary["rulesStatus"] {
+  return longSegmentsCount > 0
+    ? {
+        status: "WARNING",
+        message: `Dentro das regras com ${longSegmentsCount} aviso(s)`,
+      }
+    : { status: "OK", message: "Dentro das regras" };
+}
 
-  // 5) Paradas esperadas pela regra de 495 km (ponto de apoio)
-  const expectedStopsValue =
-    totalKm > 0 ? Math.ceil(totalKm / RULE_SUPPORT_KM) : 0;
-
-  // 6) Trechos longos (> 200 km sem parada)
-  const longSegments = schemePoints.filter(
-    (p) => (p.distancia_km ?? 0) > LONG_SEGMENT_KM
-  );
-  const longSegmentsCount = longSegments.length;
-
-  // 7) Status das regras
-  let rulesStatus: SchemeSummary["rulesStatus"] = {
-    status: "OK",
-    message: "Dentro das regras",
-  };
-
-  if (longSegmentsCount > 0) {
-    rulesStatus = {
-      status: "WARNING",
-      message: `Dentro das regras com ${longSegmentsCount} aviso(s)`,
-    };
-  }
-
+function createSummary(
+  scheme: any,
+  totalKm: number,
+  totalTravelMinutes: number,
+  totalStopMinutes: number,
+  totalDurationMinutes: number,
+  averageSpeedKmH: number | null,
+  countsByType: Record<string, number>,
+  longSegmentsCount: number,
+  expectedStopsValue: number,
+  totalStops: number,
+  totalParadas: number,
+  totalPontos: number,
+  rulesStatus: SchemeSummary["rulesStatus"],
+  rulesEvaluation: SchemeSummary["rulesEvaluation"]
+): SchemeSummary {
   return {
     schemeId: scheme.id,
-    schemeCodigo: (scheme as any).codigo ?? "",
-    schemeNome: (scheme as any).nome ?? "",
+    schemeCodigo: scheme.codigo ?? "",
+    schemeNome: scheme.nome ?? "",
 
     totalKm,
     totalStops,
@@ -537,6 +603,7 @@ export async function getSchemeSummary(
     countsByType,
     longSegmentsCount,
     rulesStatus,
+    rulesEvaluation,
   };
 }
 

@@ -1,8 +1,8 @@
 // src/modules/schemePoints/schemePoints.rules.ts
 import type { SchemePoint } from "./schemePoints.types";
 
-type RuleStatus = "OK" | "ALERTA" | "SUGESTAO";
-type RuleCode =
+export type RuleStatus = "OK" | "ALERTA" | "SUGESTAO";
+export type RuleCode =
   | "PARADA_330"
   | "APOIO_495"
   | "TROCA_MOTORISTA_660"
@@ -20,13 +20,13 @@ const TM_TOL = 0.1; // ±10%
 // Qualidade de dado
 const LIM_TRECHO_MAX = 700;
 
-interface RuleResult {
+export interface RuleResult {
   rule: RuleCode;
   status: RuleStatus;
   message: string;
 }
 
-interface SchemePointEvaluation {
+export interface SchemePointEvaluation {
   ordem: number;
   location_id: string;
   results: RuleResult[];

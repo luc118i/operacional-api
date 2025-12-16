@@ -128,7 +128,7 @@ export interface SchemeSummary {
   // - Paradas = totalStops
   // - Pontos  = totalStops - PD
   totalParadas: number; // = totalStops
-  totalPontos: number; // = totalStops - (countsByType["PD"] ?? 0)
+  totalPontos: number; // total de PCs (pontos de apoio – tipo "PA")
 
   // Paradas esperadas pela regra de 495 km (ponto de apoio)
   expectedStops: {
@@ -153,5 +153,11 @@ export interface SchemeSummary {
   rulesStatus: {
     status: "OK" | "WARNING" | "ERROR";
     message: string;
+  };
+  rulesEvaluation: {
+    totalAlertas: number;
+    totalSugestoes: number;
+    statusGeral: "OK" | "WARNING" | "CRITICAL";
+    mensagem: string;
   };
 }
