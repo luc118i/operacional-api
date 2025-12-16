@@ -1,7 +1,7 @@
 // src/modules/schemePoints/schemePoints.types.ts
 
 // Se quiser deixar mais estrito:
-export type SchemePointType = "PE" | "PD" | "PP" | "PA" | "TMJ" | string;
+export type SchemePointType = "PE" | "PD" | "PA" | null;
 
 export interface SchemePoint {
   id: string;
@@ -14,9 +14,12 @@ export interface SchemePoint {
     uf: string;
     lat: number;
     lng: number;
-    tipo?: string | null;
+    tipo: SchemePointType;
     sigla?: string | null;
   } | null;
+
+  troca_motorista: boolean;
+  ponto_operacional: boolean;
 
   // ordem do ponto no esquema (0 = inicial, 1, 2, 3...)
   ordem: number;
@@ -78,6 +81,9 @@ export interface CreateSchemePointInput {
 
   chegada_offset_min?: number | null;
   saida_offset_min?: number | null;
+
+  troca_motorista?: boolean;
+  ponto_operacional?: boolean;
 }
 
 // Payload para editar um ponto de esquema
@@ -102,4 +108,7 @@ export interface UpdateSchemePointInput {
 
   chegada_offset_min?: number | null;
   saida_offset_min?: number | null;
+
+  troca_motorista?: boolean;
+  ponto_operacional?: boolean;
 }

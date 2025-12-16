@@ -1,6 +1,8 @@
 // src/modules/schemePoints/schemePoints.controller.ts
 import type { Request, Response } from "express";
 
+import { evaluateSchemePoints } from "./schemePoints.rules";
+
 import {
   getAllSchemePoints,
   getSchemePointById,
@@ -170,5 +172,38 @@ export async function replaceSchemePointsHandler(req: Request, res: Response) {
     return res
       .status(500)
       .json({ message: "Erro ao salvar pontos do esquema operacional" });
+  }
+}
+
+/**
+ * GET /schemes/:schemeId/points/evaluation
+ * Avalia regras ANTT (330 / 495 / 660)
+ */
+export async function evaluateSchemePointsHandler(req: Request, res: Response) {
+  const { schemeId } = req.params;
+
+  try {
+    const points = await getSchemePointsBySchemeId(schemeId);
+
+    if (!points || points.length === 0) {
+      return res.json({
+        scheme_id: schemeId,
+        quantidade: 0,
+        avaliacao: [],
+      });
+    }
+
+    const evaluation = evaluateSchemePoints(points);
+
+    return res.json({
+      scheme_id: schemeId,
+      quantidade: evaluation.length,
+      avaliacao: evaluation,
+    });
+  } catch (err) {
+    console.error("[evaluateSchemePointsHandler]", err);
+    return res.status(500).json({
+      message: "Erro ao avaliar regras do esquema operacional",
+    });
   }
 }

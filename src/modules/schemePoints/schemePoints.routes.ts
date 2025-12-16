@@ -9,10 +9,17 @@ import {
   deleteSchemePointHandler,
   listPointsBySchemeIdHandler,
   replaceSchemePointsHandler,
+  evaluateSchemePointsHandler,
 } from "./schemePoints.controller";
 import { authMiddleware } from "../../middlewares/authMiddleware";
 
 const schemePointsRouter = Router();
+
+// Avaliação ANTT
+schemePointsRouter.get(
+  "/schemes/:schemeId/points/evaluation",
+  evaluateSchemePointsHandler
+);
 
 /**
  * ROTAS ORGANIZADAS
