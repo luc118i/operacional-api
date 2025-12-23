@@ -14,7 +14,7 @@ import type {
 import type { SchemePoint } from "../schemePoints/schemePoints.types";
 import { getSchemePointsBySchemeId } from "../schemePoints/schemePoints.service";
 import { evaluateSchemePoints } from "../schemePoints/schemePoints.rules";
-import { buildRulesEvaluation } from "../schemePoints/schemePoints.evaluation";
+import { buildRulesEvaluation } from "../schemePoints/schemePoints.evaluation.summary";
 
 const RULE_SUPPORT_KM = 495; // ponto de apoio (ex.: 880 km / 495 = 2)
 const LONG_SEGMENT_KM = 200; // alerta de trecho muito longo

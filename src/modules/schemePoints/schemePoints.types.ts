@@ -1,12 +1,21 @@
 // src/modules/schemePoints/schemePoints.types.ts
 
 // Se quiser deixar mais estrito:
-export type SchemePointType = "PE" | "PD" | "PA" | null;
+export type SchemePointType = string | null;
+
+export type PointFunction =
+  | "DESCANSO"
+  | "APOIO"
+  | "TROCA_MOTORISTA"
+  | "EMBARQUE"
+  | "DESEMBARQUE"
+  | "PARADA_LIVRE";
 
 export interface SchemePoint {
   id: string;
   scheme_id: string;
   location_id: string;
+
   location?: {
     id: string;
     descricao: string;
@@ -14,48 +23,44 @@ export interface SchemePoint {
     uf: string;
     lat: number;
     lng: number;
-    tipo: SchemePointType;
+    tipo: string | null;
     sigla?: string | null;
   } | null;
+
+  // 🔹 FUNÇÕES DO PONTO (ANTT / OPERAÇÃO)
+  is_rest_stop: boolean;
+  is_support_point: boolean;
+  is_boarding_point: boolean;
+  is_dropoff_point: boolean;
+  is_free_stop: boolean;
 
   troca_motorista: boolean;
   ponto_operacional: boolean;
 
-  // ordem do ponto no esquema (0 = inicial, 1, 2, 3...)
   ordem: number;
-
-  // tipo do ponto (embarque, desembarque, parada, apoio, troca de motorista etc.)
   tipo: SchemePointType;
 
-  // distância do ponto anterior até este (trecho)
   distancia_km: number | null;
-
-  // distância acumulada desde a origem até este ponto
   distancia_acumulada_km: number | null;
 
-  // tempo de deslocamento do ponto anterior até este (em minutos)
   tempo_deslocamento_min: number | null;
-
-  // tempo parado neste ponto (em minutos)
   tempo_no_local_min: number | null;
 
-  // velocidade média do trecho anterior (opcional)
   velocidade_media_kmh: number | null;
 
-  // flags auxiliares
   is_initial: boolean;
   is_final: boolean;
 
-  // info complementar
-  estabelecimento?: string | null; // nome do posto / apoio / ponto comercial
-  justificativa?: string | null; // ANTT / operacional / observações
+  estabelecimento?: string | null;
+  justificativa?: string | null;
 
-  // horários relativos ao início da viagem (se você tiver essas colunas no banco)
   chegada_offset_min?: number | null;
   saida_offset_min?: number | null;
 
   created_at: string;
   updated_at?: string | null;
+
+  functions?: PointFunction[];
 }
 
 // Payload para criar um ponto de esquema
@@ -84,6 +89,14 @@ export interface CreateSchemePointInput {
 
   troca_motorista?: boolean;
   ponto_operacional?: boolean;
+
+  is_rest_stop?: boolean;
+  is_support_point?: boolean;
+  is_boarding_point?: boolean;
+  is_dropoff_point?: boolean;
+  is_free_stop?: boolean;
+
+  functions?: PointFunction[];
 }
 
 // Payload para editar um ponto de esquema
@@ -111,4 +124,12 @@ export interface UpdateSchemePointInput {
 
   troca_motorista?: boolean;
   ponto_operacional?: boolean;
+
+  is_rest_stop?: boolean;
+  is_support_point?: boolean;
+  is_boarding_point?: boolean;
+  is_dropoff_point?: boolean;
+  is_free_stop?: boolean;
+
+  functions?: PointFunction[];
 }

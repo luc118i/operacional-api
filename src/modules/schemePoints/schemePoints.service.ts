@@ -6,6 +6,12 @@ import type {
   UpdateSchemePointInput,
 } from "./schemePoints.types";
 
+import { normalizeSchemePointInput } from "./schemePoints.normalize";
+import {
+  attachFunctionsToPoint,
+  attachFunctionsToPoints,
+} from "./schemePoints.functions";
+
 /**
  * Busca TODOS os pontos de TODOS os esquemas.
  * Útil mais pra debug/admin.
@@ -22,7 +28,7 @@ export async function getAllSchemePoints(): Promise<SchemePoint[]> {
     throw new Error("Erro ao buscar pontos de esquema operacional");
   }
 
-  return (data ?? []) as SchemePoint[];
+  return attachFunctionsToPoints((data ?? []) as SchemePoint[]);
 }
 
 /**
@@ -46,7 +52,7 @@ export async function getSchemePointById(
     throw new Error("Erro ao buscar ponto de esquema operacional");
   }
 
-  return data as SchemePoint;
+  return attachFunctionsToPoint(data as SchemePoint);
 }
 
 /**
@@ -80,7 +86,7 @@ export async function getSchemePointsBySchemeId(
     throw new Error("Erro ao buscar pontos do esquema operacional");
   }
 
-  return (data ?? []) as SchemePoint[];
+  return attachFunctionsToPoints((data ?? []) as SchemePoint[]);
 }
 
 /**
@@ -89,9 +95,15 @@ export async function getSchemePointsBySchemeId(
 export async function createSchemePoint(
   input: CreateSchemePointInput
 ): Promise<SchemePoint> {
+  // ✅ 1) normaliza: functions -> flags (ou legado)
+  const normalized = normalizeSchemePointInput(input);
+
+  // ✅ 2) nunca manda "functions" pro banco (coluna não existe)
+  const { functions, ...dbPayload } = normalized as any;
+
   const { data, error } = await supabase
     .from("scheme_points")
-    .insert(input)
+    .insert(dbPayload)
     .select("*")
     .single();
 
@@ -100,7 +112,8 @@ export async function createSchemePoint(
     throw new Error("Erro ao criar ponto de esquema operacional");
   }
 
-  return data as SchemePoint;
+  // ✅ 3) resposta pública inclui functions derivado das flags salvas
+  return attachFunctionsToPoint(data as SchemePoint);
 }
 
 /**
@@ -110,9 +123,15 @@ export async function updateSchemePoint(
   id: string,
   input: UpdateSchemePointInput
 ): Promise<SchemePoint | null> {
+  // ✅ 1) normaliza
+  const normalized = normalizeSchemePointInput(input);
+
+  // ✅ 2) remove functions do payload do banco
+  const { functions, ...dbPayload } = normalized as any;
+
   const { data, error } = await supabase
     .from("scheme_points")
-    .update(input)
+    .update(dbPayload)
     .eq("id", id)
     .select("*")
     .single();
@@ -125,7 +144,8 @@ export async function updateSchemePoint(
     throw new Error("Erro ao atualizar ponto de esquema operacional");
   }
 
-  return data as SchemePoint;
+  // ✅ 3) resposta com functions
+  return data ? attachFunctionsToPoint(data as SchemePoint) : null;
 }
 
 /**
@@ -155,12 +175,16 @@ export async function setSchemePointsForScheme(
   points: CreateSchemePointInput[]
 ): Promise<SchemePoint[]> {
   // segurança: garantir que todos têm o mesmo scheme_id
-  const normalizedPoints = points.map((p, index) => ({
-    ...p,
-    scheme_id: schemeId,
-    // se não vier ordem, usa o índice
-    ordem: p.ordem ?? index,
-  }));
+  const normalizedPoints = points.map((p, index) => {
+    const normalized = normalizeSchemePointInput({
+      ...p,
+      scheme_id: schemeId,
+      ordem: p.ordem ?? index,
+    } as any);
+
+    const { functions, ...dbPayload } = normalized as any;
+    return dbPayload;
+  });
 
   // 1) apaga os pontos anteriores
   const { error: deleteError } = await supabase
@@ -195,5 +219,5 @@ export async function setSchemePointsForScheme(
     throw new Error("Erro ao salvar pontos do esquema operacional");
   }
 
-  return (data ?? []) as SchemePoint[];
+  return attachFunctionsToPoints((data ?? []) as SchemePoint[]);
 }
