@@ -6,13 +6,12 @@ export type SchemePointFunction =
   | "TROCA_MOTORISTA"
   | "EMBARQUE"
   | "DESEMBARQUE"
-  | "PARADA_LIVRE"
-  | "OPERACIONAL";
+  | "PARADA_LIVRE";
 
 const ORDER: SchemePointFunction[] = [
   "TROCA_MOTORISTA",
   "APOIO",
-  "OPERACIONAL",
+
   "PARADA_LIVRE",
   "EMBARQUE",
   "DESEMBARQUE",
@@ -35,7 +34,7 @@ export function deriveFunctionsFromFlags(
 
   if (p.troca_motorista) out.push("TROCA_MOTORISTA");
   if (p.is_support_point) out.push("APOIO");
-  if (p.ponto_operacional) out.push("OPERACIONAL");
+
   if (p.is_free_stop) out.push("PARADA_LIVRE");
   if (p.is_boarding_point) out.push("EMBARQUE");
   if (p.is_dropoff_point) out.push("DESEMBARQUE");

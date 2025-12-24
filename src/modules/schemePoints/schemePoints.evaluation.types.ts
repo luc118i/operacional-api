@@ -26,7 +26,8 @@ export type PointFunction =
   | "TROCA_MOTORISTA"
   | "EMBARQUE"
   | "DESEMBARQUE"
-  | "PARADA_LIVRE";
+  | "PARADA_LIVRE"
+  | "OPERACIONAL";
 
 /** Status geral por regra (compatível com seu JSON atual). */
 export type EvaluationStatus = "OK" | "ALERTA" | "ERRO";
