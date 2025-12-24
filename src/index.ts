@@ -11,7 +11,11 @@ import { authRoutes } from "./routes/authRoutes";
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 3333;
+
+// Railway injeta PORT como string; converta para number.
+const PORT = Number(process.env.PORT) || 3333;
+// Bind explícito para ambientes containerizados (Railway/Docker).
+const HOST = "0.0.0.0";
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -33,14 +37,16 @@ app.use(
   })
 );
 
-app.use(cors());
-app.options(/.*/, cors());
+// REMOVER: você já configurou cors acima.
+// app.use(cors());
+// app.options(/.*/, cors());
 
 app.use(express.json());
 
 app.get("/status", (_req, res) => {
   res.json({ status: "ok", message: "API operacional rodando 🚍" });
 });
+
 // 🔐
 app.use(authRoutes);
 // 📡 rotas de leitura (públicas)
@@ -49,6 +55,6 @@ app.use("/schemes", schemesRouter);
 app.use("/scheme-points", schemePointsRouter);
 app.use("/road-segments", roadSegmentsRoutes);
 
-app.listen(port, () => {
-  console.log(`🚀 API rodando em http://localhost:${port}`);
+app.listen(PORT, HOST, () => {
+  console.log(`🚀 API rodando em http://${HOST}:${PORT}`);
 });
