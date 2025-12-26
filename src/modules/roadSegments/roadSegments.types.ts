@@ -9,7 +9,9 @@ export interface RoadSegment {
 }
 
 export type RoadDistanceResult = {
+  roadSegmentUuid: string;
   distanceKm: number;
+  durationMin: number | null;
   cached: boolean;
   source: "db" | "ors" | "fallback";
 };

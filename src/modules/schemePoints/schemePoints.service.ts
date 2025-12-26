@@ -179,7 +179,10 @@ export async function setSchemePointsForScheme(
     const normalized = normalizeSchemePointInput({
       ...p,
       scheme_id: schemeId,
-      ordem: p.ordem ?? index,
+      ordem:
+        typeof p.ordem === "number" && Number.isFinite(p.ordem) && p.ordem > 0
+          ? p.ordem
+          : index + 1,
     } as any);
 
     const { functions, ...dbPayload } = normalized as any;

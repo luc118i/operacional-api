@@ -9,7 +9,8 @@ export type PointFunction =
   | "TROCA_MOTORISTA"
   | "EMBARQUE"
   | "DESEMBARQUE"
-  | "PARADA_LIVRE";
+  | "PARADA_LIVRE"
+  | "OPERACIONAL";
 
 export interface SchemePoint {
   id: string;
@@ -61,6 +62,8 @@ export interface SchemePoint {
   updated_at?: string | null;
 
   functions?: PointFunction[];
+
+  road_segment_uuid?: string | null;
 }
 
 // Payload para criar um ponto de esquema
@@ -97,6 +100,8 @@ export interface CreateSchemePointInput {
   is_free_stop?: boolean;
 
   functions?: PointFunction[];
+
+  road_segment_uuid?: string | null;
 }
 
 // Payload para editar um ponto de esquema
@@ -132,4 +137,6 @@ export interface UpdateSchemePointInput {
   is_free_stop?: boolean;
 
   functions?: PointFunction[];
+
+  road_segment_uuid?: string | null;
 }

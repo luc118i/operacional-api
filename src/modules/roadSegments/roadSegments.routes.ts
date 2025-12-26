@@ -4,7 +4,7 @@ import { getOrCreateRoadSegmentDistanceKm } from "./roadSegments.service";
 
 const router = Router();
 
-// GET /api/road-distance?fromLocationId=1&toLocationId=2
+// src/modules/roadSegments/roadSegments.routes.ts
 router.get("/road-distance", async (req, res) => {
   try {
     const fromLocationId = String(req.query.fromLocationId ?? "").trim();
@@ -24,13 +24,14 @@ router.get("/road-distance", async (req, res) => {
     return res.json({
       fromLocationId,
       toLocationId,
+      roadSegmentUuid: result.roadSegmentUuid || null,
       distanceKm: result.distanceKm,
+      durationMin: result.durationMin,
       cached: result.cached,
       source: result.source,
     });
   } catch (err: any) {
     console.error("[/api/road-distance] erro:", err);
-
     return res.status(500).json({
       error: "Erro ao calcular distância por trecho.",
       details: err?.message ?? String(err),

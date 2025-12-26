@@ -38,14 +38,39 @@ function normalizeFunctions(raw: any): FunctionKey[] | null {
     if (ALLOWED.has(key)) out.push(key);
   }
 
-  // remove duplicados mantendo ordem
   return Array.from(new Set(out));
+}
+
+function normalizeOrder(raw: any): number | undefined {
+  // update pode vir sem ordem; nesse caso, não inventa
+  if (raw == null) return undefined;
+
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return undefined;
+
+  const int = Math.trunc(n);
+  if (int < 1) return 1;
+
+  return int;
+}
+
+function isLikelyUuid(v: any): v is string {
+  if (typeof v !== "string") return false;
+  // validação simples (suficiente para evitar "" / lixo)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+    v.trim()
+  );
 }
 
 export function normalizeSchemePointInput<T extends AnyInput>(input: T): T {
   const functions = normalizeFunctions((input as any).functions);
 
-  // defaults: sempre definimos flags para evitar undefined no banco
+  const normalizedOrder = normalizeOrder((input as any).ordem);
+
+  // road_segment_uuid (não inventa; só saneia)
+  const rawRoadUuid = (input as any).road_segment_uuid;
+  const road_segment_uuid = isLikelyUuid(rawRoadUuid) ? rawRoadUuid : null;
+
   const baseFlags = {
     is_rest_stop: false,
     is_support_point: false,
@@ -56,7 +81,36 @@ export function normalizeSchemePointInput<T extends AnyInput>(input: T): T {
     ponto_operacional: false,
   };
 
-  // ✅ Se vier functions, ele manda (contrato público)
+  // Helper: aplica regras de integridade finais
+  const finalize = (obj: any) => {
+    // normaliza ordem se vier
+    if (normalizedOrder !== undefined) {
+      obj.ordem = normalizedOrder;
+    }
+
+    // ✅ regra pedida: primeiro ponto nunca tem trecho
+    if (obj.ordem === 1) {
+      obj.road_segment_uuid = null;
+    } else {
+      // mantém (sanitizado) quando não é o primeiro
+      // se input não trouxe nada válido, fica null
+      obj.road_segment_uuid = road_segment_uuid;
+    }
+
+    // ✅ coerência com o front: ponto_operacional derivado das flags
+    obj.ponto_operacional =
+      asBool(obj.ponto_operacional) ||
+      asBool(obj.troca_motorista) ||
+      asBool(obj.is_rest_stop) ||
+      asBool(obj.is_support_point) ||
+      asBool(obj.is_boarding_point) ||
+      asBool(obj.is_dropoff_point) ||
+      asBool(obj.is_free_stop);
+
+    return obj;
+  };
+
+  // Se vier functions, ele manda (contrato público)
   if (functions !== null) {
     const derived = { ...baseFlags };
 
@@ -86,16 +140,16 @@ export function normalizeSchemePointInput<T extends AnyInput>(input: T): T {
       }
     }
 
-    return {
+    return finalize({
       ...(input as any),
       ...derived,
       // mantém functions normalizado para debug (não persiste no DB)
       functions,
-    } as T;
+    }) as T;
   }
 
-  // ✅ Legado (se algum cliente antigo ainda mandar flags diretamente)
-  return {
+  // Legado (cliente manda flags diretamente)
+  return finalize({
     ...(input as any),
     is_rest_stop: asBool((input as any).is_rest_stop),
     is_support_point: asBool((input as any).is_support_point),
@@ -104,5 +158,5 @@ export function normalizeSchemePointInput<T extends AnyInput>(input: T): T {
     is_free_stop: asBool((input as any).is_free_stop),
     troca_motorista: asBool((input as any).troca_motorista),
     ponto_operacional: asBool((input as any).ponto_operacional),
-  } as T;
+  }) as T;
 }
