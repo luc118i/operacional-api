@@ -3,12 +3,7 @@ import fetch from "node-fetch";
 import { supabase } from "../../config/upabaseClient";
 import type { RoadDistanceResult } from "./roadSegments.types";
 
-function haversineDistanceKm(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
+function haversineDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 6371;
   const toRad = (deg: number) => (deg * Math.PI) / 180;
   const dLat = toRad(lat2 - lat1);
@@ -26,11 +21,10 @@ export async function getOrCreateRoadSegmentDistanceKm(
   fromLocationId: string,
   toLocationId: string
 ): Promise<RoadDistanceResult> {
+  // mesmo local: não cacheia em road_segments
   if (fromLocationId === toLocationId) {
-    // Para mesmo local: não faz sentido criar road_segment.
-    // Retorne sem uuid e trate no route; ou retorne um uuid “fake” (não recomendo).
     return {
-      roadSegmentUuid: "", // controller deve aceitar vazio e não persistir em scheme_points
+      roadSegmentUuid: null,
       distanceKm: 0,
       durationMin: 0,
       cached: true,
@@ -38,7 +32,7 @@ export async function getOrCreateRoadSegmentDistanceKm(
     };
   }
 
-  // 1) busca cache (inclui stale + uuid + duration)
+  // 1) busca cache (agora com stale/uuid/duration)
   const { data: segment, error: segmentError } = await supabase
     .from("road_segments")
     .select("road_segment_uuid, distance_km, duration_min, stale")
@@ -50,20 +44,18 @@ export async function getOrCreateRoadSegmentDistanceKm(
     console.error("[road_segments] erro ao buscar:", segmentError);
   }
 
-  const cacheHit = !!segment && segment.stale === false;
-
-  if (cacheHit) {
+  // ✅ cache HIT real
+  if (segment && segment.stale === false) {
     return {
-      roadSegmentUuid: String(segment.road_segment_uuid),
+      roadSegmentUuid: segment.road_segment_uuid ?? null,
       distanceKm: Number(segment.distance_km),
-      durationMin:
-        segment.duration_min == null ? null : Number(segment.duration_min),
+      durationMin: segment.duration_min == null ? null : Number(segment.duration_min),
       cached: true,
       source: "db",
     };
   }
 
-  // 2) carrega coordenadas
+  // 2) carrega coords
   const { data: locations, error: locError } = await supabase
     .from("locations")
     .select("id, lat, lng")
@@ -90,10 +82,10 @@ export async function getOrCreateRoadSegmentDistanceKm(
     throw new Error("Locais sem coordenadas válidas (lat/lng).");
   }
 
-  // 3) calcula distância/tempo (ORS -> fallback)
+  // 3) calcula (ORS -> fallback)
   let distanceKm: number;
   let durationMin: number | null = null;
-  let source: "ors" | "fallback" = "fallback";
+  let calcSource: "ors" | "fallback" = "fallback";
 
   try {
     const apiKey = process.env.ORS_API_KEY;
@@ -118,24 +110,22 @@ export async function getOrCreateRoadSegmentDistanceKm(
     const meters = seg?.distance;
     const seconds = seg?.duration;
 
-    if (typeof meters !== "number")
-      throw new Error("Resposta ORS inválida (distance)");
+    if (typeof meters !== "number") throw new Error("Resposta ORS inválida (distance)");
     distanceKm = Number((meters / 1000).toFixed(2));
 
     if (typeof seconds === "number") {
       durationMin = Math.max(0, Math.round(seconds / 60));
     }
 
-    source = "ors";
+    calcSource = "ors";
   } catch (err) {
     console.error("[ORS] falhou, usando fallback Haversine:", err);
     distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
     durationMin = null;
-    source = "fallback";
+    calcSource = "fallback";
   }
 
-  // 4) upsert no cache (cria ou revalida se estava stale)
-  //    retorno do uuid para o frontend salvar em scheme_points
+  // 4) upsert no cache (cria ou revalida stale)
   const { data: upserted, error: upsertError } = await supabase
     .from("road_segments")
     .upsert(
@@ -145,7 +135,6 @@ export async function getOrCreateRoadSegmentDistanceKm(
         distance_km: distanceKm,
         duration_min: durationMin,
         stale: false,
-        source,
         updated_at: new Date().toISOString(),
       },
       { onConflict: "from_location_id,to_location_id" }
@@ -155,26 +144,23 @@ export async function getOrCreateRoadSegmentDistanceKm(
 
   if (upsertError) {
     console.error("[road_segments] erro no upsert:", upsertError);
-    // devolve o cálculo mesmo assim
+    // ✅ aqui é importante: se recalculou, NÃO diga cached=true
     return {
-      roadSegmentUuid: segment?.road_segment_uuid
-        ? String(segment.road_segment_uuid)
-        : "",
+      roadSegmentUuid: segment?.road_segment_uuid ?? null,
       distanceKm,
       durationMin,
       cached: false,
-      source,
+      source: calcSource,
     };
   }
 
+  // ✅ se chegou aqui, recalculou e persistiu (ou criou)
   return {
-    roadSegmentUuid: String(upserted?.road_segment_uuid ?? ""),
+    roadSegmentUuid: upserted?.road_segment_uuid ?? null,
     distanceKm: Number(upserted?.distance_km ?? distanceKm),
     durationMin:
-      upserted?.duration_min == null
-        ? durationMin
-        : Number(upserted.duration_min),
-    cached: false,
-    source,
+      upserted?.duration_min == null ? durationMin : Number(upserted.duration_min),
+    cached: false,        // <- revalidou/criou agora
+    source: calcSource,   // <- ors/fallback (verdadeiro)
   };
 }

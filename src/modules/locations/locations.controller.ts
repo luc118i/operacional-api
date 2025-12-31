@@ -1,11 +1,13 @@
 // src/modules/locations/locations.controller.ts
 import type { Request, Response } from "express";
+
+import { supabase } from "../../config/upabaseClient";
 import {
   getAllLocations,
   getLocationById,
   searchLocations,
   createLocation,
-  updateLocation,
+  updateLocationWithInvalidation,
   deleteLocation,
   getLocationBySigla,
 } from "./locations.service";
@@ -78,7 +80,7 @@ export async function handleCreateLocation(req: Request, res: Response) {
 export async function handleUpdateLocation(req: Request, res: Response) {
   try {
     const { id } = req.params;
-    const updated = await updateLocation(id, req.body);
+    const updated = await updateLocationWithInvalidation(id, req.body);
     res.json(updated);
   } catch (err: any) {
     console.error("[handleUpdateLocation] erro:", err);
@@ -94,5 +96,22 @@ export async function handleDeleteLocation(req: Request, res: Response) {
   } catch (err: any) {
     console.error("[handleDeleteLocation] erro:", err);
     res.status(500).json({ error: err.message ?? "Erro ao excluir local" });
+  }
+}
+
+export async function invalidateRoadSegmentsByLocationId(locationId: string) {
+  const { error } = await supabase
+    .from("road_segments")
+    .update({
+      stale: true,
+      duration_min: null,
+      geometry: null,
+      updated_at: new Date().toISOString(),
+    })
+    .or(`from_location_id.eq.${locationId},to_location_id.eq.${locationId}`);
+
+  if (error) {
+    console.error("[invalidateRoadSegmentsByLocationId] erro:", error);
+    throw new Error("Erro ao invalidar road_segments do local");
   }
 }

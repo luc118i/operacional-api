@@ -1,5 +1,8 @@
 // src/modules/locations/locations.service.ts
 import { supabase } from "../../config/upabaseClient";
+
+import { invalidateRoadSegmentsByLocationId } from "../roadSegments/roadSegments.invalidate";
+
 import type {
   Location,
   CreateLocationInput,
@@ -137,4 +140,51 @@ export async function deleteLocation(id: string): Promise<void> {
     console.error("[deleteLocation] erro:", error);
     throw new Error("Erro ao excluir local");
   }
+}
+
+function toNum(v: any): number | null {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function coordsChanged(
+  before: { lat: any; lng: any },
+  after: { lat: any; lng: any }
+): boolean {
+  const bLat = toNum(before.lat);
+  const bLng = toNum(before.lng);
+  const aLat = toNum(after.lat);
+  const aLng = toNum(after.lng);
+
+  // só invalida se ambas as coords existirem antes e depois
+  if ([bLat, bLng, aLat, aLng].some((x) => x === null)) return false;
+
+  // tolerância para evitar ruído de serialização
+  const EPS = 1e-6;
+
+  return (
+    Math.abs((bLat as number) - (aLat as number)) > EPS ||
+    Math.abs((bLng as number) - (aLng as number)) > EPS
+  );
+}
+
+export async function updateLocationWithInvalidation(
+  id: string,
+  input: UpdateLocationInput
+): Promise<Location> {
+  // BEFORE
+  const before = await getLocationById(id);
+  if (!before) {
+    throw new Error("Local não encontrado");
+  }
+
+  // UPDATE
+  const updated = await updateLocation(id, input);
+
+  // INVALIDATE if lat/lng changed
+  if (coordsChanged(before, updated)) {
+    await invalidateRoadSegmentsByLocationId(id);
+  }
+
+  return updated;
 }
