@@ -9,6 +9,8 @@ import type {
   UpdateLocationInput,
 } from "./locations.types";
 
+import * as schemePointsService from "../schemePoints/schemePoints.service";
+
 // Lista todos os locais
 export async function getAllLocations(): Promise<Location[]> {
   const { data, error } = await supabase
@@ -181,9 +183,19 @@ export async function updateLocationWithInvalidation(
   // UPDATE
   const updated = await updateLocation(id, input);
 
-  // INVALIDATE if lat/lng changed
+  // INVALIDATE + RECALC
   if (coordsChanged(before, updated)) {
+    console.log("[updateLocation] coords mudaram:", {
+      before: { lat: before.lat, lng: before.lng },
+      after: { lat: updated.lat, lng: updated.lng },
+    });
+
     await invalidateRoadSegmentsByLocationId(id);
+
+    const recalcResult =
+      await schemePointsService.recalculateSchemePointsByLocation(id);
+
+    console.log(`[updateLocation] scheme_points recalculados:`, recalcResult);
   }
 
   return updated;

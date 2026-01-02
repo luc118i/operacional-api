@@ -98,20 +98,3 @@ export async function handleDeleteLocation(req: Request, res: Response) {
     res.status(500).json({ error: err.message ?? "Erro ao excluir local" });
   }
 }
-
-export async function invalidateRoadSegmentsByLocationId(locationId: string) {
-  const { error } = await supabase
-    .from("road_segments")
-    .update({
-      stale: true,
-      duration_min: null,
-      geometry: null,
-      updated_at: new Date().toISOString(),
-    })
-    .or(`from_location_id.eq.${locationId},to_location_id.eq.${locationId}`);
-
-  if (error) {
-    console.error("[invalidateRoadSegmentsByLocationId] erro:", error);
-    throw new Error("Erro ao invalidar road_segments do local");
-  }
-}

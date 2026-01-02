@@ -1,10 +1,14 @@
 // src/modules/schemePoints/schemePoints.service.ts
 import { supabase } from "../../config/upabaseClient";
+import pLimit from "p-limit";
+
 import type {
   SchemePoint,
   CreateSchemePointInput,
   UpdateSchemePointInput,
 } from "./schemePoints.types";
+
+import { getOrCreateRoadSegmentDistanceKm } from "../roadSegments/roadSegments.service";
 
 import { normalizeSchemePointInput } from "./schemePoints.normalize";
 import {
@@ -223,4 +227,241 @@ export async function setSchemePointsForScheme(
   }
 
   return attachFunctionsToPoints((data ?? []) as SchemePoint[]);
+}
+
+async function getOrderedPointsForScheme(schemeId: string) {
+  const { data, error } = await supabase
+    .from("scheme_points")
+    .select("id, scheme_id, ordem, location_id")
+    .eq("scheme_id", schemeId)
+    .order("ordem", { ascending: true });
+
+  if (error) throw error;
+  return (data ?? []) as Array<{
+    id: string;
+    scheme_id: string;
+    ordem: number;
+    location_id: string;
+  }>;
+}
+
+async function updatePointDistanceAndTime(
+  pointId: string,
+  distanceKm: number | null,
+  durationMin?: number | null
+) {
+  const payload: any = {
+    distancia_km: distanceKm,
+    updated_at: new Date().toISOString(),
+  };
+
+  // só seta tempo se veio calculado
+  if (durationMin !== null && durationMin !== undefined) {
+    payload.tempo_deslocamento_min = durationMin;
+  }
+
+  const { error } = await supabase
+    .from("scheme_points")
+    .update(payload)
+    .eq("id", pointId);
+
+  if (error) throw error;
+}
+
+/**
+ * Recalcula as distâncias (e tempo) dos trechos afetados
+ * por mudança de coordenadas em uma location.
+ *
+ * Regra:
+ * - scheme_points.distancia_km é a distância do ponto anterior -> ponto atual
+ * - então se a location mudou:
+ *   a) recalcula prev -> cur (atualiza o ponto cur)
+ *   b) recalcula cur -> next (atualiza o ponto next)
+ */
+type SegmentKey = string;
+
+function segmentKey(from: string, to: string): SegmentKey {
+  return `${from}|${to}`;
+}
+
+export async function recalculateSchemePointsByLocation(locationId: string) {
+  console.log("[recalc] start for location:", locationId);
+
+  const { data: occs, error } = await supabase
+    .from("scheme_points")
+    .select("scheme_id")
+    .eq("location_id", locationId);
+
+  if (error) throw error;
+
+  const schemeIds = [...new Set((occs ?? []).map((o: any) => o.scheme_id))];
+
+  if (schemeIds.length === 0) {
+    return {
+      updatedPoints: 0,
+      schemeIdsCount: 0,
+      segmentsComputed: 0,
+      segmentsFromCache: 0,
+      segmentsFallback: 0,
+      errorsCount: 0,
+    };
+  }
+
+  // Limites de concorrência (ajuste conforme necessidade)
+  const calcLimit = pLimit(3); // ORS/cache
+  const updateLimit = pLimit(6); // writes no Supabase
+
+  // 1) Preparar lista de trechos necessários (dedupe) + lista de updates
+  const segments = new Map<SegmentKey, { from: string; to: string }>();
+  const updates: Array<{
+    schemeId: string;
+    pointId: string;
+    ordem: number;
+    from: string;
+    to: string;
+    kind: "prev->cur" | "cur->next";
+  }> = [];
+
+  for (const schemeId of schemeIds) {
+    const points = await getOrderedPointsForScheme(schemeId);
+
+    const indexes = points
+      .map((p, i) => (p.location_id === locationId ? i : -1))
+      .filter((i) => i >= 0);
+
+    if (indexes.length === 0) continue;
+
+    for (const idx of indexes) {
+      // prev -> cur (atualiza o CUR)
+      if (idx > 0) {
+        const prev = points[idx - 1];
+        const cur = points[idx];
+
+        if (prev.location_id !== cur.location_id) {
+          const key = segmentKey(prev.location_id, cur.location_id);
+          segments.set(key, { from: prev.location_id, to: cur.location_id });
+
+          updates.push({
+            schemeId,
+            pointId: cur.id,
+            ordem: cur.ordem,
+            from: prev.location_id,
+            to: cur.location_id,
+            kind: "prev->cur",
+          });
+        }
+      }
+
+      // cur -> next (atualiza o NEXT)
+      if (idx < points.length - 1) {
+        const cur = points[idx];
+        const next = points[idx + 1];
+
+        if (cur.location_id !== next.location_id) {
+          const key = segmentKey(cur.location_id, next.location_id);
+          segments.set(key, { from: cur.location_id, to: next.location_id });
+
+          updates.push({
+            schemeId,
+            pointId: next.id,
+            ordem: next.ordem,
+            from: cur.location_id,
+            to: next.location_id,
+            kind: "cur->next",
+          });
+        }
+      }
+    }
+  }
+
+  if (segments.size === 0 || updates.length === 0) {
+    return {
+      updatedPoints: 0,
+      schemeIdsCount: schemeIds.length,
+      segmentsComputed: 0,
+      segmentsFromCache: 0,
+      segmentsFallback: 0,
+      errorsCount: 0,
+    };
+  }
+
+  // 2) Calcular cada trecho UMA vez
+  const results = new Map<
+    SegmentKey,
+    Awaited<ReturnType<typeof getOrCreateRoadSegmentDistanceKm>>
+  >();
+
+  let errorsCount = 0;
+
+  const computeJobs = [...segments.entries()].map(([key, pair]) =>
+    calcLimit(async () => {
+      try {
+        const res = await getOrCreateRoadSegmentDistanceKm(pair.from, pair.to);
+        results.set(key, res);
+      } catch (e) {
+        errorsCount++;
+        console.error("[recalc] erro ao calcular segmento:", { key, e });
+      }
+    })
+  );
+
+  await Promise.all(computeJobs);
+
+  let segmentsFromCache = 0;
+  let segmentsFallback = 0;
+
+  for (const r of results.values()) {
+    if (r.cached) segmentsFromCache++;
+    if (r.source === "fallback") segmentsFallback++;
+  }
+
+  // 3) Aplicar updates nos points (concorrência controlada)
+  let updatedPoints = 0;
+
+  const updateJobs = updates.map((u) =>
+    updateLimit(async () => {
+      const key = segmentKey(u.from, u.to);
+      const res = results.get(key);
+
+      // Se não calculou esse trecho (erro), não atualiza este ponto
+      if (!res) return;
+
+      console.log("[recalc]", u.kind, {
+        schemeId: u.schemeId,
+        ordem: u.ordem,
+        from: u.from,
+        to: u.to,
+        distanceKm: res.distanceKm,
+        durationMin: res.durationMin,
+        source: res.source,
+        cached: res.cached,
+      });
+
+      try {
+        await updatePointDistanceAndTime(
+          u.pointId,
+          res.distanceKm,
+          res.durationMin
+        );
+        updatedPoints++;
+      } catch (e) {
+        errorsCount++;
+        console.error("[recalc] erro ao atualizar scheme_point:", {
+          pointId: u.pointId,
+          e,
+        });
+      }
+    })
+  );
+
+  await Promise.all(updateJobs);
+
+  return {
+    updatedPoints,
+    schemeIdsCount: schemeIds.length,
+    segmentsComputed: segments.size,
+    segmentsFromCache,
+    segmentsFallback,
+    errorsCount,
+  };
 }

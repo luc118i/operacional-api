@@ -5,8 +5,8 @@ export async function invalidateRoadSegmentsByLocationId(locationId: string) {
   const { error } = await supabase
     .from("road_segments")
     .update({
-      source: "stale",
-      // opcional, mas recomendado:
+      stale: true,
+
       duration_min: null,
       geometry: null,
       updated_at: new Date().toISOString(),

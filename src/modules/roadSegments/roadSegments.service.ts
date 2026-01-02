@@ -1,7 +1,53 @@
 // src/modules/roadSegments/roadSegments.service.ts
-import fetch from "node-fetch";
+
 import { supabase } from "../../config/upabaseClient";
-import type { RoadDistanceResult } from "./roadSegments.types";
+import type {
+  RoadDistanceResult,
+  RoadSegmentCacheRow,
+} from "./roadSegments.types";
+
+type InflightKey = string;
+
+type RoadSegmentUpsertRow = Pick<
+  RoadSegmentCacheRow,
+  "road_segment_uuid" | "distance_km" | "duration_min"
+>;
+
+const FALLBACK_UPGRADE_AFTER_MS = 6 * 60 * 60 * 1000; // 6h (ajuste: 1h/24h)
+const STALE_COOLDOWN_MS = 30_000; // já está no seu código
+
+function ageMsFromUpdatedAt(updated_at?: string | null): number | null {
+  if (!updated_at) return null;
+  const t = Date.parse(String(updated_at));
+  if (!Number.isFinite(t)) return null;
+  const age = Date.now() - t;
+  return age >= 0 ? age : null;
+}
+
+function shouldAttemptUpgradeFromFallback(
+  segment?: RoadSegmentCacheRow | null
+) {
+  if (!segment) return false;
+  if (segment.stale !== false) return false;
+  if (segment.source !== "fallback") return false;
+
+  const age = ageMsFromUpdatedAt(segment.updated_at);
+  if (age === null) return true; // se não dá pra saber, tenta
+  return age >= FALLBACK_UPGRADE_AFTER_MS;
+}
+
+// single-flight por processo (worker)
+const inflight = new Map<InflightKey, Promise<RoadDistanceResult>>();
+
+function toNumber(v: string | number | null | undefined): number | null {
+  if (v === null || v === undefined) return null;
+  const n = typeof v === "number" ? v : Number(v);
+  return Number.isFinite(n) ? n : null;
+}
+
+function inflightKey(fromId: string, toId: string): InflightKey {
+  return `${fromId}|${toId}`;
+}
 
 function haversineDistanceKm(
   lat1: number,
@@ -22,15 +68,206 @@ function haversineDistanceKm(
   return Math.round(R * c * 10) / 10;
 }
 
+type ORSResult = {
+  distanceKm: number;
+  durationMin: number | null;
+  source: "ors";
+};
+type ORSErrorInfo = {
+  status?: number;
+  code?: number; // ex.: 2010
+  message?: string;
+  raw?: any;
+};
+
+function sleep(ms: number) {
+  return new Promise((r) => setTimeout(r, ms));
+}
+
+async function fetchWithTimeout(
+  url: string,
+  init: any,
+  timeoutMs: number
+): Promise<any> {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    return await fetch(url as any, { ...init, signal: ac.signal });
+  } finally {
+    clearTimeout(t);
+  }
+}
+
+function isTransientHttp(status?: number) {
+  return status === 429 || (status != null && status >= 500);
+}
+
+function parseORSError(bodyText: string, status?: number): ORSErrorInfo {
+  try {
+    const j = JSON.parse(bodyText);
+    // ORS costuma devolver erro com "error": { "code": 2010, "message": "..." } ou variações
+    const code =
+      j?.error?.code ??
+      j?.error?.error_code ??
+      j?.code ??
+      j?.error_code ??
+      undefined;
+
+    const message =
+      j?.error?.message ??
+      j?.error?.error ??
+      j?.message ??
+      j?.error ??
+      bodyText;
+
+    return {
+      status,
+      code: typeof code === "number" ? code : undefined,
+      message,
+      raw: j,
+    };
+  } catch {
+    return { status, message: bodyText };
+  }
+}
+
+async function tryLockRoadSegment(fromId: string, toId: string) {
+  const { data, error } = await supabase.rpc("try_lock_road_segment", {
+    from_id: fromId,
+    to_id: toId,
+  });
+
+  if (error) {
+    console.error("[lock] try_lock_road_segment error:", error);
+    return { locked: true, lockSupported: false };
+  }
+
+  return { locked: Boolean(data), lockSupported: true };
+}
+
+async function unlockRoadSegment(fromId: string, toId: string): Promise<void> {
+  const { error } = await supabase.rpc("unlock_road_segment", {
+    from_id: fromId,
+    to_id: toId,
+  });
+
+  if (error) {
+    console.error("[lock] unlock_road_segment error:", error);
+  }
+}
+
+async function callORSWithRadiuses(
+  apiKey: string,
+  fromLng: number,
+  fromLat: number,
+  toLng: number,
+  toLat: number
+): Promise<ORSResult> {
+  const url = "https://api.openrouteservice.org/v2/directions/driving-car";
+
+  // tenta radiuses 500, depois 2000
+  const radiusesList = [
+    [500, 500],
+    [2000, 2000],
+  ];
+
+  // retry em erros transitórios (timeout/5xx/429) por tentativa de radius
+  const maxRetries = 2;
+  const timeoutMs = 12000;
+
+  let lastErr: ORSErrorInfo | null = null;
+
+  for (const radiuses of radiusesList) {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        const resp = await fetchWithTimeout(
+          url,
+          {
+            method: "POST",
+            headers: {
+              Authorization: apiKey,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              coordinates: [
+                [fromLng, fromLat],
+                [toLng, toLat],
+              ],
+              radiuses,
+            }),
+          },
+          timeoutMs
+        );
+
+        if (!resp.ok) {
+          const body = await resp.text();
+          const info = parseORSError(body, resp.status);
+          lastErr = info;
+
+          // erro estrutural (ex.: 2010) -> não adianta retry
+          if (info.code === 2010)
+            throw Object.assign(new Error("ORS_2010"), { ors: info });
+
+          // erro transitório -> retry com backoff curto
+          if (isTransientHttp(resp.status) && attempt < maxRetries) {
+            await sleep(250 * (attempt + 1));
+            continue;
+          }
+
+          throw Object.assign(new Error("ORS_HTTP_ERROR"), { ors: info });
+        }
+
+        const data = (await resp.json()) as any;
+        const seg = data?.features?.[0]?.properties?.segments?.[0];
+        const meters = seg?.distance;
+        const seconds = seg?.duration;
+
+        if (typeof meters !== "number") {
+          throw Object.assign(new Error("ORS_INVALID_DISTANCE"), {
+            ors: { raw: data },
+          });
+        }
+
+        const distanceKm = Number((meters / 1000).toFixed(2));
+        const durationMin =
+          typeof seconds === "number"
+            ? Math.max(0, Math.round(seconds / 60))
+            : null;
+
+        return { distanceKm, durationMin, source: "ors" };
+      } catch (e: any) {
+        // abort/timeout costuma cair aqui também
+        const info: ORSErrorInfo | undefined = e?.ors;
+
+        // 2010: ponto não roteável -> encerra radiuses e cai fora para fallback
+        if (e?.message === "ORS_2010" || info?.code === 2010) {
+          throw e;
+        }
+
+        // timeout/abort ou transitório sem status -> retry local
+        if (attempt < maxRetries) {
+          await sleep(250 * (attempt + 1));
+          continue;
+        }
+
+        // esgota retries: tenta próximo radius ou falha final
+        lastErr = info ?? lastErr ?? { message: String(e?.message ?? e) };
+        break;
+      }
+    }
+  }
+
+  throw Object.assign(new Error("ORS_FAILED"), { ors: lastErr });
+}
+
 export async function getOrCreateRoadSegmentDistanceKm(
   fromLocationId: string,
   toLocationId: string
 ): Promise<RoadDistanceResult> {
+  // Caso trivial
   if (fromLocationId === toLocationId) {
-    // Para mesmo local: não faz sentido criar road_segment.
-    // Retorne sem uuid e trate no route; ou retorne um uuid “fake” (não recomendo).
     return {
-      roadSegmentUuid: "", // controller deve aceitar vazio e não persistir em scheme_points
+      roadSegmentUuid: "",
       distanceKm: 0,
       durationMin: 0,
       cached: true,
@@ -38,143 +275,211 @@ export async function getOrCreateRoadSegmentDistanceKm(
     };
   }
 
-  // 1) busca cache (inclui stale + uuid + duration)
-  const { data: segment, error: segmentError } = await supabase
-    .from("road_segments")
-    .select("road_segment_uuid, distance_km, duration_min, stale")
-    .eq("from_location_id", fromLocationId)
-    .eq("to_location_id", toLocationId)
-    .maybeSingle();
+  // ✅ Single-flight por processo
+  const key = inflightKey(fromLocationId, toLocationId);
+  const existing = inflight.get(key);
+  if (existing) return existing;
 
-  if (segmentError) {
-    console.error("[road_segments] erro ao buscar:", segmentError);
-  }
+  const job = (async (): Promise<RoadDistanceResult> => {
+    // 1) Busca cache
+    const { data: segment, error: segmentError } = await supabase
+      .from("road_segments")
+      .select(
+        "road_segment_uuid, distance_km, duration_min, stale, updated_at, source"
+      )
+      .eq("from_location_id", fromLocationId)
+      .eq("to_location_id", toLocationId)
+      .maybeSingle<RoadSegmentCacheRow>();
 
-  const cacheHit = !!segment && segment.stale === false;
+    if (segmentError) {
+      console.error("[road_segments] erro ao buscar:", segmentError);
+    }
 
-  if (cacheHit) {
-    return {
-      roadSegmentUuid: String(segment.road_segment_uuid),
-      distanceKm: Number(segment.distance_km),
-      durationMin:
-        segment.duration_min == null ? null : Number(segment.duration_min),
-      cached: true,
-      source: "db",
-    };
-  }
+    // Cache válido
+    const cachedDistance = segment ? toNumber(segment.distance_km) : null;
+    const hasValidCache = segment?.stale === false && cachedDistance != null;
 
-  // 2) carrega coordenadas
-  const { data: locations, error: locError } = await supabase
-    .from("locations")
-    .select("id, lat, lng")
-    .in("id", [fromLocationId, toLocationId]);
+    // ✅ cache “bom” retorna imediatamente,
+    // EXCETO se for fallback antigo e você quiser tentar upgrade para ORS.
+    if (hasValidCache && !shouldAttemptUpgradeFromFallback(segment)) {
+      return {
+        roadSegmentUuid: String(segment.road_segment_uuid ?? ""),
+        distanceKm: cachedDistance!,
+        durationMin: toNumber(segment.duration_min),
+        cached: true,
+        source: "db",
+      };
+    }
 
-  if (locError) {
-    console.error("[locations] erro ao buscar:", locError);
-    throw new Error("Erro ao carregar locais");
-  }
+    // Cooldown: evita recalcular várias vezes em sequência
+    // ✅ mas não deve impedir upgrade (fallback antigo)
+    if (
+      segment?.stale === false &&
+      !shouldAttemptUpgradeFromFallback(segment) &&
+      segment?.updated_at
+    ) {
+      const ageMs = ageMsFromUpdatedAt(segment.updated_at);
+      const dist = toNumber(segment.distance_km);
+      if (ageMs !== null && ageMs < STALE_COOLDOWN_MS && dist != null) {
+        return {
+          roadSegmentUuid: String(segment.road_segment_uuid ?? ""),
+          distanceKm: dist,
+          durationMin: toNumber(segment.duration_min),
+          cached: true,
+          source: "db",
+        };
+      }
+    }
 
-  const fromLoc = locations?.find((l) => l.id === fromLocationId);
-  const toLoc = locations?.find((l) => l.id === toLocationId);
+    // 1.5) Lock cross-instance
+    const { locked, lockSupported } = await tryLockRoadSegment(
+      fromLocationId,
+      toLocationId
+    );
 
-  if (!fromLoc || !toLoc) {
-    throw new Error("Origem ou destino não encontrado na tabela locations.");
-  }
+    if (!locked) {
+      for (const waitMs of [300, 800]) {
+        await sleep(waitMs);
 
-  const fromLat = Number(fromLoc.lat);
-  const fromLng = Number(fromLoc.lng);
-  const toLat = Number(toLoc.lat);
-  const toLng = Number(toLoc.lng);
+        const { data: seg2 } = await supabase
+          .from("road_segments")
+          .select(
+            "road_segment_uuid, distance_km, duration_min, stale, updated_at, source"
+          )
+          .eq("from_location_id", fromLocationId)
+          .eq("to_location_id", toLocationId)
+          .maybeSingle<RoadSegmentCacheRow>();
 
-  if (![fromLat, fromLng, toLat, toLng].every((n) => Number.isFinite(n))) {
-    throw new Error("Locais sem coordenadas válidas (lat/lng).");
-  }
+        const dist2 = seg2 ? toNumber(seg2.distance_km) : null;
 
-  // 3) calcula distância/tempo (ORS -> fallback)
-  let distanceKm: number;
-  let durationMin: number | null = null;
-  let source: "ors" | "fallback" = "fallback";
+        if (seg2?.stale === false && dist2 != null) {
+          return {
+            roadSegmentUuid: String(seg2.road_segment_uuid ?? ""),
+            distanceKm: dist2,
+            durationMin: toNumber(seg2.duration_min),
+            cached: true,
+            source: "db",
+          };
+        }
+      }
+    }
+
+    try {
+      // 2) Coordenadas
+      const { data: locations, error: locError } = await supabase
+        .from("locations")
+        .select("id, lat, lng")
+        .in("id", [fromLocationId, toLocationId]);
+
+      if (locError) {
+        console.error("[locations] erro ao buscar:", locError);
+        throw new Error("Erro ao carregar locais");
+      }
+
+      const fromLoc = locations?.find((l) => l.id === fromLocationId);
+      const toLoc = locations?.find((l) => l.id === toLocationId);
+
+      if (!fromLoc || !toLoc) {
+        throw new Error(
+          "Origem ou destino não encontrado na tabela locations."
+        );
+      }
+
+      const fromLat = Number(fromLoc.lat);
+      const fromLng = Number(fromLoc.lng);
+      const toLat = Number(toLoc.lat);
+      const toLng = Number(toLoc.lng);
+
+      if (![fromLat, fromLng, toLat, toLng].every(Number.isFinite)) {
+        throw new Error("Locais sem coordenadas válidas (lat/lng).");
+      }
+
+      // 3) ORS → fallback
+      let distanceKm: number;
+      let durationMin: number | null = null;
+      let calcSource: "ors" | "fallback" = "fallback";
+
+      const apiKey = process.env.ORS_API_KEY;
+
+      if (apiKey && locked) {
+        try {
+          const ors = await callORSWithRadiuses(
+            apiKey,
+            fromLng,
+            fromLat,
+            toLng,
+            toLat
+          );
+          distanceKm = ors.distanceKm;
+          durationMin = ors.durationMin;
+          calcSource = "ors";
+        } catch (e: any) {
+          console.error("[ORS] falhou, usando fallback:", e?.ors);
+          distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
+        }
+      } else {
+        distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
+      }
+
+      // 4) Sem lock → não persiste
+      if (!locked) {
+        return {
+          roadSegmentUuid: "",
+          distanceKm,
+          durationMin,
+          cached: false,
+          source: calcSource,
+        };
+      }
+
+      // 5) Upsert
+      const { data: upserted, error: upsertError } = await supabase
+        .from("road_segments")
+        .upsert(
+          {
+            from_location_id: fromLocationId,
+            to_location_id: toLocationId,
+            distance_km: distanceKm,
+            duration_min: durationMin,
+            stale: false,
+            source: calcSource,
+            updated_at: new Date().toISOString(),
+          },
+          { onConflict: "from_location_id,to_location_id" }
+        )
+        .select("road_segment_uuid, distance_km, duration_min")
+        .maybeSingle<RoadSegmentUpsertRow>();
+
+      if (upsertError) {
+        console.error("[road_segments] erro no upsert:", upsertError);
+        return {
+          roadSegmentUuid: String(segment?.road_segment_uuid ?? ""),
+          distanceKm,
+          durationMin,
+          cached: false,
+          source: calcSource,
+        };
+      }
+
+      return {
+        roadSegmentUuid: String(upserted?.road_segment_uuid ?? ""),
+        distanceKm: toNumber(upserted?.distance_km) ?? distanceKm,
+        durationMin: toNumber(upserted?.duration_min) ?? durationMin,
+        cached: false,
+        source: calcSource,
+      };
+    } finally {
+      if (locked && lockSupported) {
+        await unlockRoadSegment(fromLocationId, toLocationId);
+      }
+    }
+  })();
+
+  inflight.set(key, job);
 
   try {
-    const apiKey = process.env.ORS_API_KEY;
-    if (!apiKey) throw new Error("ORS_API_KEY não configurada");
-
-    const url =
-      "https://api.openrouteservice.org/v2/directions/driving-car" +
-      `?api_key=${apiKey}` +
-      `&start=${fromLng},${fromLat}` +
-      `&end=${toLng},${toLat}`;
-
-    const response = await fetch(url as any);
-    if (!response.ok) {
-      const body = await response.text();
-      console.error("[ORS] erro:", response.status, body);
-      throw new Error("Falha na chamada ORS");
-    }
-
-    const data = (await response.json()) as any;
-    const seg = data?.features?.[0]?.properties?.segments?.[0];
-
-    const meters = seg?.distance;
-    const seconds = seg?.duration;
-
-    if (typeof meters !== "number")
-      throw new Error("Resposta ORS inválida (distance)");
-    distanceKm = Number((meters / 1000).toFixed(2));
-
-    if (typeof seconds === "number") {
-      durationMin = Math.max(0, Math.round(seconds / 60));
-    }
-
-    source = "ors";
-  } catch (err) {
-    console.error("[ORS] falhou, usando fallback Haversine:", err);
-    distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
-    durationMin = null;
-    source = "fallback";
+    return await job;
+  } finally {
+    inflight.delete(key);
   }
-
-  // 4) upsert no cache (cria ou revalida se estava stale)
-  //    retorno do uuid para o frontend salvar em scheme_points
-  const { data: upserted, error: upsertError } = await supabase
-    .from("road_segments")
-    .upsert(
-      {
-        from_location_id: fromLocationId,
-        to_location_id: toLocationId,
-        distance_km: distanceKm,
-        duration_min: durationMin,
-        stale: false,
-        source,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "from_location_id,to_location_id" }
-    )
-    .select("road_segment_uuid, distance_km, duration_min")
-    .maybeSingle();
-
-  if (upsertError) {
-    console.error("[road_segments] erro no upsert:", upsertError);
-    // devolve o cálculo mesmo assim
-    return {
-      roadSegmentUuid: segment?.road_segment_uuid
-        ? String(segment.road_segment_uuid)
-        : "",
-      distanceKm,
-      durationMin,
-      cached: false,
-      source,
-    };
-  }
-
-  return {
-    roadSegmentUuid: String(upserted?.road_segment_uuid ?? ""),
-    distanceKm: Number(upserted?.distance_km ?? distanceKm),
-    durationMin:
-      upserted?.duration_min == null
-        ? durationMin
-        : Number(upserted.duration_min),
-    cached: false,
-    source,
-  };
 }
