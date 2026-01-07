@@ -382,7 +382,6 @@ export async function getSchemeSummary(
   schemeId: string
 ): Promise<SchemeSummary | null> {
   try {
-    // 1) Buscar o esquema
     const { data: scheme, error: schemeError } = await supabase
       .from("schemes")
       .select("*")
@@ -391,11 +390,10 @@ export async function getSchemeSummary(
 
     if (schemeError) {
       if ((schemeError as any).code === "PGRST116") return null;
-      console.error("[getSchemeSummary] erro ao buscar scheme:", schemeError);
-      throw new Error("Erro ao buscar esquema operacional");
+      console.error("[getSchemeSummary] schemeError:", schemeError);
+      return null; // ✅ fallback
     }
 
-    // 2) Buscar os pontos do esquema
     const { data: points, error: pointsError } = await supabase
       .from("scheme_points")
       .select("*")
@@ -403,21 +401,18 @@ export async function getSchemeSummary(
       .order("ordem", { ascending: true });
 
     if (pointsError) {
-      console.error(
-        "[getSchemeSummary] erro ao buscar scheme_points:",
-        pointsError
-      );
-      throw new Error("Erro ao buscar pontos do esquema operacional");
+      console.error("[getSchemeSummary] pointsError:", pointsError);
+      return null; // ✅ fallback
     }
 
     const schemePoints = points ?? [];
 
-    // Se não tiver pontos, devolve um resumo "zerado"
     if (schemePoints.length === 0) {
       return createEmptySummary(scheme);
     }
 
-    // 3) Cálculos principais
+    // ... resto igual (cálculos e avaliações)
+    // Se evaluate/build der erro por algum dado inesperado, também deve cair no fallback:
     const totalKm = calculateTotalKm(schemePoints);
     const totalTravelMinutes = calculateTotalTravelMinutes(schemePoints);
     const totalStopMinutes = calculateTotalStopMinutes(schemePoints);
@@ -427,17 +422,10 @@ export async function getSchemeSummary(
       totalKm,
       totalTravelMinutes
     );
-
-    // 4) Contar por tipo (PD, PA, TM, etc.)
     const countsByType = countPointsByType(schemePoints);
 
-    // 5) Paradas esperadas pela regra de 495 km (ponto de apoio)
     const expectedStopsValue = calculateExpectedStopsValue(totalKm);
-
-    // 6) Trechos longos (> 200 km sem parada)
     const longSegmentsCount = countLongSegments(schemePoints);
-
-    // 7) Status das regras
     const rulesStatus = determineRulesStatus(longSegmentsCount);
 
     const totalStops = schemePoints.length;
@@ -465,7 +453,7 @@ export async function getSchemeSummary(
     );
   } catch (error) {
     console.error("[getSchemeSummary] erro inesperado:", error);
-    throw new Error("Erro inesperado ao calcular resumo do esquema");
+    return null; // ✅ fallback em vez de 500
   }
 }
 
