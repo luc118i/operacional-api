@@ -8,6 +8,8 @@ import { schemePointsRouter } from "./modules/schemePoints";
 import roadSegmentsRoutes from "./modules/roadSegments/roadSegments.routes";
 import { authRoutes } from "./routes/authRoutes";
 
+import { schemeImportsRouter } from "./modules/schemeImports/schemeImports.routes";
+
 dotenv.config();
 
 const app = express();
@@ -46,6 +48,8 @@ app.use(express.json());
 app.get("/status", (_req, res) => {
   res.json({ status: "ok", message: "API operacional rodando 🚍" });
 });
+
+app.use("/imports", schemeImportsRouter);
 
 // 🔐
 app.use(authRoutes);
