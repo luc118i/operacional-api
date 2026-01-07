@@ -64,11 +64,6 @@ export const schemeImportsService = {
       // 1) parse + canonical
       const rows = await parseCsvFile(fileBuffer);
 
-      console.log("[import] rows:", rows.length);
-      console.log("[import] first row keys:", Object.keys(rows[0] ?? {}));
-      console.log("[import] first row sample:", rows[0]);
-      console.log("[import] second row sample:", rows[1]);
-
       const batch = canonicalizeImport(rows);
 
       // 2) resolve + validate

@@ -16,6 +16,19 @@ import {
   attachFunctionsToPoints,
 } from "./schemePoints.functions";
 
+type PLimitFn = (
+  concurrency: number
+) => <T>(fn: () => Promise<T>) => Promise<T>;
+
+let pLimitPromise: Promise<PLimitFn> | null = null;
+
+async function getPLimit(): Promise<PLimitFn> {
+  if (!pLimitPromise) {
+    pLimitPromise = import("p-limit").then((m: any) => m.default as PLimitFn);
+  }
+  return pLimitPromise;
+}
+
 /**
  * Busca TODOS os pontos de TODOS os esquemas.
  * Útil mais pra debug/admin.
@@ -285,8 +298,6 @@ function segmentKey(from: string, to: string): SegmentKey {
 }
 
 export async function recalculateSchemePointsByLocation(locationId: string) {
-  console.log("[recalc] start for location:", locationId);
-
   const { data: occs, error } = await supabase
     .from("scheme_points")
     .select("scheme_id")
@@ -308,6 +319,7 @@ export async function recalculateSchemePointsByLocation(locationId: string) {
   }
 
   // Limites de concorrência (ajuste conforme necessidade)
+  const pLimit = await getPLimit();
   const calcLimit = pLimit(3); // ORS/cache
   const updateLimit = pLimit(6); // writes no Supabase
 
@@ -426,17 +438,6 @@ export async function recalculateSchemePointsByLocation(locationId: string) {
       // Se não calculou esse trecho (erro), não atualiza este ponto
       if (!res) return;
 
-      console.log("[recalc]", u.kind, {
-        schemeId: u.schemeId,
-        ordem: u.ordem,
-        from: u.from,
-        to: u.to,
-        distanceKm: res.distanceKm,
-        durationMin: res.durationMin,
-        source: res.source,
-        cached: res.cached,
-      });
-
       try {
         await updatePointDistanceAndTime(
           u.pointId,
@@ -478,8 +479,9 @@ export async function recalculateSchemePointsForScheme(
   schemeId: string,
   opts?: { calcConcurrency?: number; updateConcurrency?: number }
 ) {
-  const calcLimit = pLimit(opts?.calcConcurrency ?? 3); // ORS/cache
-  const updateLimit = pLimit(opts?.updateConcurrency ?? 6); // writes Supabase
+  const pLimit = await getPLimit();
+  const calcLimit = pLimit(opts?.calcConcurrency ?? 3);
+  const updateLimit = pLimit(opts?.updateConcurrency ?? 6);
 
   const points = await getOrderedPointsForScheme(schemeId);
 
