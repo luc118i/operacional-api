@@ -606,16 +606,12 @@ export async function findSchemeByKey(
     .eq("codigo", codigo)
     .eq("direction", direction)
     .eq("trip_time", tripTime)
-    .single();
+    .maybeSingle<Scheme>();
 
   if (error) {
-    // PGRST116 = nenhum registro encontrado
-    if ((error as any).code === "PGRST116") {
-      return null;
-    }
     console.error("[findSchemeByKey] erro:", error);
     throw new Error("Erro ao buscar esquema operacional por chave.");
   }
 
-  return data as Scheme;
+  return data ?? null;
 }

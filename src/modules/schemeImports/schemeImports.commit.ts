@@ -22,9 +22,9 @@ async function findExistingSchemeByKey(params: {
   const { data, error } = await supabase
     .from("schemes")
     .select("id")
-    .eq("codigo_linha", params.codigoLinha)
-    .eq("sentido", params.sentido)
-    .eq("hora_partida", params.horaPartida)
+    .eq("codigo", params.codigoLinha)
+    .eq("direction", params.sentido)
+    .eq("trip_time", params.horaPartida)
     .maybeSingle<ExistingSchemeRow>();
 
   if (error) throw error;
@@ -184,7 +184,9 @@ export async function commitImportBatch(params: {
         });
 
         if (existing) {
-          const pointsCount = await countSchemePoints(existing.id);
+          const existingSchemeId = existing.id;
+
+          const pointsCount = await countSchemePoints(existingSchemeId);
 
           if (pointsCount === 0) {
             const missing = (scheme.points ?? []).filter(
@@ -199,25 +201,27 @@ export async function commitImportBatch(params: {
             const { error: delErr } = await supabase
               .from("scheme_points")
               .delete()
-              .eq("scheme_id", existing.id);
+              .eq("scheme_id", existingSchemeId);
 
             if (delErr) throw delErr;
 
             await setSchemePointsForScheme(
-              existing.id,
+              existingSchemeId,
               scheme.points.map((p: any) => ({
-                scheme_id: existing.id,
+                scheme_id: existingSchemeId,
                 location_id: p.locationId,
                 ordem: p.sequencia,
-                parada_min: p.paradaMin ?? 0,
+                tempo_no_local_min: p.paradaMin ?? 0,
               }))
             );
 
-            const recalc = await recalculateSchemePointsForScheme(existing.id);
+            const recalc = await recalculateSchemePointsForScheme(
+              existingSchemeId
+            );
 
             results.push({
               externalKey: scheme.externalKey,
-              schemeId: existing.id,
+              schemeId: existingSchemeId,
               status: "RESUMED_POINTS",
               recalc,
               key: {
@@ -233,7 +237,7 @@ export async function commitImportBatch(params: {
           skippedCount++;
           results.push({
             externalKey: scheme.externalKey,
-            schemeId: existing.id,
+            schemeId: existingSchemeId,
             status: "SKIPPED_ALREADY_EXISTS",
             key: {
               codigoLinha: scheme.codigoLinha,
@@ -244,14 +248,14 @@ export async function commitImportBatch(params: {
           continue;
         }
 
+        // --------- CREATED ---------
         const { data: createdScheme, error: createError } = await supabase
           .from("schemes")
           .insert({
-            codigo_linha: scheme.codigoLinha,
-            nome_linha: scheme.nomeLinha,
-            sentido: scheme.sentido,
-            hora_partida: scheme.horaPartida,
-            operating_days_mask: scheme.operatingDaysMask,
+            codigo: scheme.codigoLinha,
+            nome: scheme.nomeLinha,
+            direction: scheme.sentido,
+            trip_time: scheme.horaPartida,
           })
           .select("id")
           .single<{ id: string }>();
@@ -259,7 +263,7 @@ export async function commitImportBatch(params: {
         if (createError) throw createError;
         if (!createdScheme) throw new Error("Falha ao criar scheme (null).");
 
-        const schemeId = createdScheme.id;
+        const createdSchemeId = createdScheme.id;
 
         const missing = (scheme.points ?? []).filter((p: any) => !p.locationId);
         if (missing.length > 0) {
@@ -271,26 +275,26 @@ export async function commitImportBatch(params: {
         const { error: delErr } = await supabase
           .from("scheme_points")
           .delete()
-          .eq("scheme_id", schemeId);
+          .eq("scheme_id", createdSchemeId);
 
         if (delErr) throw delErr;
 
         await setSchemePointsForScheme(
-          schemeId,
+          createdSchemeId,
           scheme.points.map((p: any) => ({
-            scheme_id: schemeId,
+            scheme_id: createdSchemeId,
             location_id: p.locationId,
             ordem: p.sequencia,
-            parada_min: p.paradaMin ?? 0,
+            tempo_no_local_min: p.paradaMin ?? 0,
           }))
         );
 
-        const recalc = await recalculateSchemePointsForScheme(schemeId);
+        const recalc = await recalculateSchemePointsForScheme(createdSchemeId);
 
         createdCount++;
         results.push({
           externalKey: scheme.externalKey,
-          schemeId,
+          schemeId: createdSchemeId,
           status: "CREATED",
           recalc,
         });
