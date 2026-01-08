@@ -1,6 +1,7 @@
 import { supabase } from "../../config/upabaseClient";
 import { setSchemePointsForScheme } from "../schemePoints/schemePoints.service";
 import { recalculateSchemePointsForScheme } from "../schemePoints/schemePoints.service";
+import { updateSchemeSummary } from "../schemes/schemes.summary.service";
 
 type ImportSessionRow = {
   import_session_id: string;
@@ -219,11 +220,15 @@ export async function commitImportBatch(params: {
               existingSchemeId
             );
 
+            // ✅ Opção A: consolida header do scheme depois do recalc
+            const summary = await updateSchemeSummary(existingSchemeId);
+
             results.push({
               externalKey: scheme.externalKey,
               schemeId: existingSchemeId,
               status: "RESUMED_POINTS",
               recalc,
+              summary, // opcional (útil pra debug/validação)
               key: {
                 codigoLinha: scheme.codigoLinha,
                 sentido: scheme.sentido,
@@ -291,12 +296,16 @@ export async function commitImportBatch(params: {
 
         const recalc = await recalculateSchemePointsForScheme(createdSchemeId);
 
+        // ✅ Opção A: consolida header do scheme depois do recalc
+        const summary = await updateSchemeSummary(createdSchemeId);
+
         createdCount++;
         results.push({
           externalKey: scheme.externalKey,
           schemeId: createdSchemeId,
           status: "CREATED",
           recalc,
+          summary, // opcional (útil pra debug/validação)
         });
       } catch (e: any) {
         failedCount++;
