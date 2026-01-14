@@ -20,6 +20,21 @@ type PLimitFn = (
   concurrency: number
 ) => <T>(fn: () => Promise<T>) => Promise<T>;
 
+type PointRow = {
+  id: string;
+  ordem: number;
+  distancia_km: number | string | null;
+  tempo_deslocamento_min: number | null;
+  tempo_no_local_min: number | null;
+};
+
+function toNumber(v: number | string | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  if (typeof v === "number") return Number.isFinite(v) ? v : 0;
+  const n = Number(v);
+  return Number.isFinite(n) ? n : 0;
+}
+
 let pLimitPromise: Promise<PLimitFn> | null = null;
 
 async function getPLimit(): Promise<PLimitFn> {
@@ -258,25 +273,30 @@ async function getOrderedPointsForScheme(schemeId: string) {
   }>;
 }
 
-async function updatePointDistanceAndTime(
-  pointId: string,
-  distanceKm: number | null,
-  durationMin?: number | null
-) {
+async function updatePointSegmentDistanceAndTime(params: {
+  pointId: string;
+  distanceKm: number | null;
+  durationMin?: number | null;
+  roadSegmentUuid?: string | null;
+}) {
   const payload: any = {
-    distancia_km: distanceKm,
+    distancia_km: params.distanceKm,
     updated_at: new Date().toISOString(),
   };
 
-  // só seta tempo se veio calculado
-  if (durationMin !== null && durationMin !== undefined) {
-    payload.tempo_deslocamento_min = durationMin;
+  if (params.durationMin !== null && params.durationMin !== undefined) {
+    payload.tempo_deslocamento_min = params.durationMin;
+  }
+
+  // ✅ persiste link do trecho
+  if (params.roadSegmentUuid !== undefined) {
+    payload.road_segment_uuid = params.roadSegmentUuid; // pode ser null
   }
 
   const { error } = await supabase
     .from("scheme_points")
     .update(payload)
-    .eq("id", pointId);
+    .eq("id", params.pointId);
 
   if (error) throw error;
 }
@@ -439,11 +459,13 @@ export async function recalculateSchemePointsByLocation(locationId: string) {
       if (!res) return;
 
       try {
-        await updatePointDistanceAndTime(
-          u.pointId,
-          res.distanceKm,
-          res.durationMin
-        );
+        await updatePointSegmentDistanceAndTime({
+          pointId: u.pointId,
+          distanceKm: res.distanceKm,
+          durationMin: res.durationMin,
+          roadSegmentUuid: res.roadSegmentUuid ?? null,
+        });
+
         updatedPoints++;
       } catch (e) {
         errorsCount++;
@@ -580,21 +602,27 @@ export async function recalculateSchemePointsForScheme(
       try {
         // caso trivial (mesmo location): não passa pelo Map
         if (u.from === u.to) {
-          await updatePointDistanceAndTime(u.pointId, 0, 0);
+          await updatePointSegmentDistanceAndTime({
+            pointId: u.pointId,
+            distanceKm: 0,
+            durationMin: 0,
+            roadSegmentUuid: null,
+          });
           updatedPoints++;
           return;
         }
 
         const key = segmentKey(u.from, u.to);
         const res = results.get(key);
+        if (!res) return;
 
-        if (!res) return; // não calculou => não atualiza
+        await updatePointSegmentDistanceAndTime({
+          pointId: u.pointId,
+          distanceKm: res.distanceKm,
+          durationMin: res.durationMin,
+          roadSegmentUuid: res.roadSegmentUuid ?? null,
+        });
 
-        await updatePointDistanceAndTime(
-          u.pointId,
-          res.distanceKm,
-          res.durationMin
-        );
         updatedPoints++;
       } catch (e) {
         errorsCount++;
@@ -615,4 +643,104 @@ export async function recalculateSchemePointsForScheme(
     segmentsFallback,
     errorsCount,
   };
+}
+
+/**
+ * Preenche campos derivados dos points:
+ * - distancia_acumulada_km
+ * - velocidade_media_kmh
+ * - chegada_offset_min / saida_offset_min
+ *
+ * Regra: ponto 1 começa em offset 0.
+ * chegada_offset do ponto i = saida_offset do ponto i-1 + tempo_deslocamento_min(i)
+ * saida_offset do ponto i = chegada_offset + tempo_no_local_min(i)
+ */
+export async function updateSchemePointsDerivedFields(schemeId: string) {
+  const { data, error } = await supabase
+    .from("scheme_points")
+    .select(
+      "id, ordem, distancia_km, tempo_deslocamento_min, tempo_no_local_min"
+    )
+    .eq("scheme_id", schemeId)
+    .order("ordem", { ascending: true });
+
+  if (error) throw error;
+
+  const points = (data ?? []) as PointRow[];
+  if (points.length === 0) return { updated: 0 };
+
+  let cumulativeKm = 0;
+  let prevSaidaOffset = 0;
+
+  // Atualizações em memória
+  const updates: Array<{
+    id: string;
+    distancia_acumulada_km: number;
+    velocidade_media_kmh: number | null;
+    chegada_offset_min: number;
+    saida_offset_min: number;
+  }> = [];
+
+  for (let i = 0; i < points.length; i++) {
+    const p = points[i];
+
+    if (i === 0 || p.ordem === 1) {
+      // ponto 1: sem trecho
+      const stop = p.tempo_no_local_min ?? 0;
+
+      updates.push({
+        id: p.id,
+        distancia_acumulada_km: 0,
+        velocidade_media_kmh: null,
+        chegada_offset_min: 0,
+        saida_offset_min: 0 + stop,
+      });
+
+      cumulativeKm = 0;
+      prevSaidaOffset = 0 + stop;
+      continue;
+    }
+
+    const dist = toNumber(p.distancia_km);
+    const drive = p.tempo_deslocamento_min ?? 0;
+    const stop = p.tempo_no_local_min ?? 0;
+
+    cumulativeKm += dist;
+
+    const chegada = prevSaidaOffset + drive;
+    const saida = chegada + stop;
+
+    const velocidade =
+      drive > 0 && dist > 0 ? Number((dist / (drive / 60)).toFixed(1)) : null;
+
+    updates.push({
+      id: p.id,
+      distancia_acumulada_km: cumulativeKm,
+      velocidade_media_kmh: velocidade,
+      chegada_offset_min: chegada,
+      saida_offset_min: saida,
+    });
+
+    prevSaidaOffset = saida;
+  }
+
+  // Persistência (em lote, com concorrência pequena)
+  let updated = 0;
+  for (const u of updates) {
+    const { error: upErr } = await supabase
+      .from("scheme_points")
+      .update({
+        distancia_acumulada_km: u.distancia_acumulada_km,
+        velocidade_media_kmh: u.velocidade_media_kmh,
+        chegada_offset_min: u.chegada_offset_min,
+        saida_offset_min: u.saida_offset_min,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", u.id);
+
+    if (upErr) throw upErr;
+    updated++;
+  }
+
+  return { updated };
 }

@@ -1,5 +1,8 @@
 import { supabase } from "../../config/upabaseClient";
-import { setSchemePointsForScheme } from "../schemePoints/schemePoints.service";
+import {
+  setSchemePointsForScheme,
+  updateSchemePointsDerivedFields,
+} from "../schemePoints/schemePoints.service";
 import { recalculateSchemePointsForScheme } from "../schemePoints/schemePoints.service";
 import { updateSchemeSummary } from "../schemes/schemes.summary.service";
 
@@ -296,7 +299,10 @@ export async function commitImportBatch(params: {
 
         const recalc = await recalculateSchemePointsForScheme(createdSchemeId);
 
-        // ✅ Opção A: consolida header do scheme depois do recalc
+        // ✅ novos derivados (equivalente ao “recalcAllRoutePoints” do front)
+        const derived = await updateSchemePointsDerivedFields(createdSchemeId);
+
+        // ✅ header do scheme
         const summary = await updateSchemeSummary(createdSchemeId);
 
         createdCount++;
