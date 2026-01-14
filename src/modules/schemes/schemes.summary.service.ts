@@ -67,9 +67,12 @@ export async function updateSchemeSummary(schemeId: string): Promise<{
       points_count,
     };
   }
+  const firstWithLocation = points.find((p) => !!p.location_id) ?? null;
+  const lastWithLocation =
+    [...points].reverse().find((p) => !!p.location_id) ?? null;
 
-  const origem_location_id = points[0]?.location_id ?? null;
-  const destino_location_id = points[points.length - 1]?.location_id ?? null;
+  const origem_location_id = firstWithLocation?.location_id ?? null;
+  const destino_location_id = lastWithLocation?.location_id ?? null;
 
   // 2) Soma somente ordem > 1 (ponto 1 não possui trecho)
   let distancia_total_km = 0;
