@@ -683,7 +683,7 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
   for (let i = 0; i < points.length; i++) {
     const p = points[i];
 
-    if (i === 0 || p.ordem === 1) {
+    if (i === 0) {
       // ponto 1: sem trecho
       const stop = p.tempo_no_local_min ?? 0;
 

@@ -18,6 +18,33 @@ type ImportSessionRow = {
 
 type ExistingSchemeRow = { id: string };
 
+async function needsDerivedRecalc(schemeId: string) {
+  const { data, error } = await supabase
+    .from("scheme_points")
+    .select("id")
+    .eq("scheme_id", schemeId)
+    .is("chegada_offset_min", null)
+    .limit(1);
+
+  if (error) throw error;
+  return (data?.length ?? 0) > 0;
+}
+
+async function needsSegmentRecalc(schemeId: string) {
+  const { data, error } = await supabase
+    .from("scheme_points")
+    .select("id")
+    .eq("scheme_id", schemeId)
+    .or(
+      "distancia_km.is.null,tempo_deslocamento_min.is.null,road_segment_uuid.is.null"
+    )
+
+    .limit(1);
+
+  if (error) throw error;
+  return (data?.length ?? 0) > 0;
+}
+
 async function findExistingSchemeByKey(params: {
   codigoLinha: string;
   sentido: string;
@@ -190,75 +217,37 @@ export async function commitImportBatch(params: {
         if (existing) {
           const existingSchemeId = existing.id;
 
-          const pointsCount = await countSchemePoints(existingSchemeId);
+          const doSegments = await needsSegmentRecalc(existingSchemeId);
+          const doDerived = await needsDerivedRecalc(existingSchemeId);
 
-          if (pointsCount === 0) {
-            const missing = (scheme.points ?? []).filter(
-              (p: any) => !p.locationId
-            );
-            if (missing.length > 0) {
-              throw new Error(
-                `Scheme existente está sem pontos, mas import possui pontos sem locationId (${missing.length}).`
-              );
-            }
+          let recalc = null;
+          let derived = null;
+          let summary = null;
 
-            const { error: delErr } = await supabase
-              .from("scheme_points")
-              .delete()
-              .eq("scheme_id", existingSchemeId);
-
-            if (delErr) throw delErr;
-
-            await setSchemePointsForScheme(
-              existingSchemeId,
-              scheme.points.map((p: any) => ({
-                scheme_id: existingSchemeId,
-                location_id: p.locationId,
-                ordem: p.sequencia,
-                tempo_no_local_min: p.paradaMin ?? 0,
-              }))
-            );
-
-            const recalc = await recalculateSchemePointsForScheme(
-              existingSchemeId
-            );
-
-            // ✅ novos derivados
-            const derived = await updateSchemePointsDerivedFields(
-              existingSchemeId
-            );
-
-            // ✅ header do scheme
-            const summary = await updateSchemeSummary(existingSchemeId);
-
-            results.push({
-              externalKey: scheme.externalKey,
-              schemeId: existingSchemeId,
-              status: "RESUMED_POINTS",
-              recalc,
-              derived,
-              summary,
-              key: {
-                codigoLinha: scheme.codigoLinha,
-                sentido: scheme.sentido,
-                horaPartida: scheme.horaPartida,
-              },
-            });
-
-            continue;
+          if (doSegments) {
+            recalc = await recalculateSchemePointsForScheme(existingSchemeId);
+            derived = await updateSchemePointsDerivedFields(existingSchemeId); // força
+          } else if (doDerived) {
+            derived = await updateSchemePointsDerivedFields(existingSchemeId);
           }
 
-          skippedCount++;
+          if (recalc || derived) {
+            summary = await updateSchemeSummary(existingSchemeId);
+          }
+
           results.push({
             externalKey: scheme.externalKey,
             schemeId: existingSchemeId,
-            status: "SKIPPED_ALREADY_EXISTS",
-            key: {
-              codigoLinha: scheme.codigoLinha,
-              sentido: scheme.sentido,
-              horaPartida: scheme.horaPartida,
-            },
+            status:
+              recalc || derived
+                ? "REPAIRED_EXISTING"
+                : "SKIPPED_ALREADY_EXISTS",
+            recalc,
+            derived,
+            summary,
           });
+
+          if (!(recalc || derived)) skippedCount++;
           continue;
         }
 
