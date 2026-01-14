@@ -1,6 +1,5 @@
 // src/modules/schemePoints/schemePoints.service.ts
 import { supabase } from "../../config/upabaseClient";
-import pLimit from "p-limit";
 
 import type {
   SchemePoint,

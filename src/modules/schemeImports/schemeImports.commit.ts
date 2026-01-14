@@ -223,7 +223,12 @@ export async function commitImportBatch(params: {
               existingSchemeId
             );
 
-            // ✅ Opção A: consolida header do scheme depois do recalc
+            // ✅ novos derivados
+            const derived = await updateSchemePointsDerivedFields(
+              existingSchemeId
+            );
+
+            // ✅ header do scheme
             const summary = await updateSchemeSummary(existingSchemeId);
 
             results.push({
@@ -231,7 +236,8 @@ export async function commitImportBatch(params: {
               schemeId: existingSchemeId,
               status: "RESUMED_POINTS",
               recalc,
-              summary, // opcional (útil pra debug/validação)
+              derived,
+              summary,
               key: {
                 codigoLinha: scheme.codigoLinha,
                 sentido: scheme.sentido,
@@ -280,13 +286,6 @@ export async function commitImportBatch(params: {
           );
         }
 
-        const { error: delErr } = await supabase
-          .from("scheme_points")
-          .delete()
-          .eq("scheme_id", createdSchemeId);
-
-        if (delErr) throw delErr;
-
         await setSchemePointsForScheme(
           createdSchemeId,
           scheme.points.map((p: any) => ({
@@ -311,7 +310,8 @@ export async function commitImportBatch(params: {
           schemeId: createdSchemeId,
           status: "CREATED",
           recalc,
-          summary, // opcional (útil pra debug/validação)
+          derived,
+          summary,
         });
       } catch (e: any) {
         failedCount++;
