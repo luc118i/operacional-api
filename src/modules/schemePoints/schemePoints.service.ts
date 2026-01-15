@@ -742,23 +742,31 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
     prevSaidaOffset = saida;
   }
 
-  // Persistência (em lote, com concorrência pequena)
-  let updated = 0;
-  for (const u of updates) {
-    const { error: upErr } = await supabase
-      .from("scheme_points")
-      .update({
-        distancia_acumulada_km: u.distancia_acumulada_km,
-        velocidade_media_kmh: u.velocidade_media_kmh,
-        chegada_offset_min: u.chegada_offset_min,
-        saida_offset_min: u.saida_offset_min,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", u.id);
+  // Persistência em lote (mais rápido e detecta RLS via contagem)
+  const payload = updates.map((u) => ({
+    id: u.id,
+    distancia_acumulada_km: u.distancia_acumulada_km,
+    velocidade_media_kmh: u.velocidade_media_kmh,
+    chegada_offset_min: u.chegada_offset_min,
+    saida_offset_min: u.saida_offset_min,
+    updated_at: new Date().toISOString(),
+  }));
 
-    if (upErr) throw upErr;
-    updated++;
+  const { data: rows, error: err } = await supabase
+    .from("scheme_points")
+    .upsert(payload, { onConflict: "id" })
+    .select("id");
+
+  if (err) throw err;
+
+  // ✅ Se RLS/policy bloquear, o supabase pode "não atualizar" sem erro; detectamos aqui
+  if (!rows || rows.length !== payload.length) {
+    throw new Error(
+      `[derived] upsert afetou ${rows?.length ?? 0}/${
+        payload.length
+      } linhas (provável RLS/policy)`
+    );
   }
 
-  return { updated };
+  return { updated: rows.length };
 }
