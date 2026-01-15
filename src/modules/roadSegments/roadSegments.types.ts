@@ -39,10 +39,12 @@ export type RoadSegmentCacheRow = Pick<
 /**
  * Resultado do seu serviço (já normalizado)
  */
+export type RoadDistanceSource = "db" | "ors" | "fallback";
+
 export type RoadDistanceResult = {
-  roadSegmentUuid: string;
+  roadSegmentUuid: string | null;
   distanceKm: number;
   durationMin: number | null;
   cached: boolean;
-  source: "db" | "ors" | "fallback";
+  source: RoadDistanceSource;
 };

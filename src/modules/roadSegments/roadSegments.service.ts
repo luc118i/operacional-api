@@ -5,6 +5,7 @@ import type {
   RoadDistanceResult,
   RoadSegmentCacheRow,
 } from "./roadSegments.types";
+("");
 
 type InflightKey = string;
 
@@ -267,7 +268,7 @@ export async function getOrCreateRoadSegmentDistanceKm(
   // Caso trivial
   if (fromLocationId === toLocationId) {
     return {
-      roadSegmentUuid: "",
+      roadSegmentUuid: null,
       distanceKm: 0,
       durationMin: 0,
       cached: true,
@@ -281,55 +282,47 @@ export async function getOrCreateRoadSegmentDistanceKm(
   if (existing) return existing;
 
   const job = (async (): Promise<RoadDistanceResult> => {
-    // 1) Busca cache
-    const { data: segment, error: segmentError } = await supabase
-      .from("road_segments")
-      .select(
-        "road_segment_uuid, distance_km, duration_min, stale, updated_at, source"
-      )
-      .eq("from_location_id", fromLocationId)
-      .eq("to_location_id", toLocationId)
-      .maybeSingle<RoadSegmentCacheRow>();
+    // helper: lê cache e valida (inclui uuid)
+    const readValidCache = async (): Promise<RoadDistanceResult | null> => {
+      const { data: seg, error: segErr } = await supabase
+        .from("road_segments")
+        .select(
+          "road_segment_uuid, distance_km, duration_min, stale, updated_at, source"
+        )
+        .eq("from_location_id", fromLocationId)
+        .eq("to_location_id", toLocationId)
+        .maybeSingle<RoadSegmentCacheRow>();
 
-    if (segmentError) {
-      console.error("[road_segments] erro ao buscar:", segmentError);
-    }
+      if (segErr) {
+        console.error("[road_segments] erro ao buscar:", segErr);
+        return null;
+      }
 
-    // Cache válido
-    const cachedDistance = segment ? toNumber(segment.distance_km) : null;
-    const hasValidCache = segment?.stale === false && cachedDistance != null;
+      const dist = seg ? toNumber(seg.distance_km) : null;
+      const uuid = seg?.road_segment_uuid
+        ? String(seg.road_segment_uuid)
+        : null;
 
-    // ✅ cache “bom” retorna imediatamente,
-    // EXCETO se for fallback antigo e você quiser tentar upgrade para ORS.
-    if (hasValidCache && !shouldAttemptUpgradeFromFallback(segment)) {
+      // cache só é "válido" se tiver distância e uuid e stale=false
+      const hasValidCache = seg?.stale === false && dist != null && !!uuid;
+
+      if (!hasValidCache) return null;
+
+      // Se for fallback antigo e você quiser upgrade, deixe o caller decidir
+      if (shouldAttemptUpgradeFromFallback(seg)) return null;
+
       return {
-        roadSegmentUuid: String(segment.road_segment_uuid ?? ""),
-        distanceKm: cachedDistance!,
-        durationMin: toNumber(segment.duration_min),
+        roadSegmentUuid: uuid,
+        distanceKm: dist!,
+        durationMin: toNumber(seg.duration_min),
         cached: true,
         source: "db",
       };
-    }
+    };
 
-    // Cooldown: evita recalcular várias vezes em sequência
-    // ✅ mas não deve impedir upgrade (fallback antigo)
-    if (
-      segment?.stale === false &&
-      !shouldAttemptUpgradeFromFallback(segment) &&
-      segment?.updated_at
-    ) {
-      const ageMs = ageMsFromUpdatedAt(segment.updated_at);
-      const dist = toNumber(segment.distance_km);
-      if (ageMs !== null && ageMs < STALE_COOLDOWN_MS && dist != null) {
-        return {
-          roadSegmentUuid: String(segment.road_segment_uuid ?? ""),
-          distanceKm: dist,
-          durationMin: toNumber(segment.duration_min),
-          cached: true,
-          source: "db",
-        };
-      }
-    }
+    // 1) Cache válido retorna imediatamente
+    const cached = await readValidCache();
+    if (cached) return cached;
 
     // 1.5) Lock cross-instance
     const { locked, lockSupported } = await tryLockRoadSegment(
@@ -337,31 +330,17 @@ export async function getOrCreateRoadSegmentDistanceKm(
       toLocationId
     );
 
+    // ✅ Sem lock: aguarda e tenta ler cache algumas vezes; se não aparecer, falha.
     if (!locked) {
-      for (const waitMs of [300, 800]) {
+      for (const waitMs of [300, 800, 1500]) {
         await sleep(waitMs);
-
-        const { data: seg2 } = await supabase
-          .from("road_segments")
-          .select(
-            "road_segment_uuid, distance_km, duration_min, stale, updated_at, source"
-          )
-          .eq("from_location_id", fromLocationId)
-          .eq("to_location_id", toLocationId)
-          .maybeSingle<RoadSegmentCacheRow>();
-
-        const dist2 = seg2 ? toNumber(seg2.distance_km) : null;
-
-        if (seg2?.stale === false && dist2 != null) {
-          return {
-            roadSegmentUuid: String(seg2.road_segment_uuid ?? ""),
-            distanceKm: dist2,
-            durationMin: toNumber(seg2.duration_min),
-            cached: true,
-            source: "db",
-          };
-        }
+        const cached2 = await readValidCache();
+        if (cached2) return cached2;
       }
+
+      throw new Error(
+        `[road_segments] não foi possível obter lock e cache não apareceu a tempo (${fromLocationId} -> ${toLocationId})`
+      );
     }
 
     try {
@@ -394,14 +373,14 @@ export async function getOrCreateRoadSegmentDistanceKm(
         throw new Error("Locais sem coordenadas válidas (lat/lng).");
       }
 
-      // 3) ORS → fallback
+      // 3) ORS → fallback (aqui lock=true, então pode usar ORS se tiver key)
       let distanceKm: number;
       let durationMin: number | null = null;
       let calcSource: "ors" | "fallback" = "fallback";
 
       const apiKey = process.env.ORS_API_KEY;
 
-      if (apiKey && locked) {
+      if (apiKey) {
         try {
           const ors = await callORSWithRadiuses(
             apiKey,
@@ -421,18 +400,7 @@ export async function getOrCreateRoadSegmentDistanceKm(
         distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
       }
 
-      // 4) Sem lock → não persiste
-      if (!locked) {
-        return {
-          roadSegmentUuid: "",
-          distanceKm,
-          durationMin,
-          cached: false,
-          source: calcSource,
-        };
-      }
-
-      // 5) Upsert
+      // 5) Upsert (lock=true => sempre persiste)
       const { data: upserted, error: upsertError } = await supabase
         .from("road_segments")
         .upsert(
@@ -452,17 +420,23 @@ export async function getOrCreateRoadSegmentDistanceKm(
 
       if (upsertError) {
         console.error("[road_segments] erro no upsert:", upsertError);
-        return {
-          roadSegmentUuid: String(segment?.road_segment_uuid ?? ""),
-          distanceKm,
-          durationMin,
-          cached: false,
-          source: calcSource,
-        };
+        throw new Error(
+          `[road_segments] upsert falhou (${fromLocationId} -> ${toLocationId})`
+        );
+      }
+
+      const uuid = upserted?.road_segment_uuid
+        ? String(upserted.road_segment_uuid)
+        : null;
+
+      if (!uuid) {
+        throw new Error(
+          `[road_segments] upsert não retornou road_segment_uuid (${fromLocationId} -> ${toLocationId})`
+        );
       }
 
       return {
-        roadSegmentUuid: String(upserted?.road_segment_uuid ?? ""),
+        roadSegmentUuid: uuid,
         distanceKm: toNumber(upserted?.distance_km) ?? distanceKm,
         durationMin: toNumber(upserted?.duration_min) ?? durationMin,
         cached: false,

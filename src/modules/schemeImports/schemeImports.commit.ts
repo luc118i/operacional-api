@@ -30,6 +30,38 @@ async function needsDerivedRecalc(schemeId: string) {
   return (data?.length ?? 0) > 0;
 }
 
+async function countMissingSegments(schemeId: string): Promise<number> {
+  const { count, error } = await supabase
+    .from("scheme_points")
+    .select("id", { count: "exact", head: true })
+    .eq("scheme_id", schemeId)
+    .gt("ordem", 1)
+    .or(
+      "distancia_km.is.null,tempo_deslocamento_min.is.null,road_segment_uuid.is.null"
+    );
+
+  if (error) throw error;
+  return count ?? 0;
+}
+
+async function countMissingDerived(schemeId: string): Promise<number> {
+  const { count, error } = await supabase
+    .from("scheme_points")
+    .select("id", { count: "exact", head: true })
+    .eq("scheme_id", schemeId)
+    .or(
+      [
+        "distancia_acumulada_km.is.null",
+        "chegada_offset_min.is.null",
+        "saida_offset_min.is.null",
+        "velocidade_media_kmh.is.null",
+      ].join(",")
+    );
+
+  if (error) throw error;
+  return count ?? 0;
+}
+
 async function needsSegmentRecalc(schemeId: string) {
   const { data, error } = await supabase
     .from("scheme_points")
@@ -217,37 +249,50 @@ export async function commitImportBatch(params: {
         if (existing) {
           const existingSchemeId = existing.id;
 
-          const doSegments = await needsSegmentRecalc(existingSchemeId);
-          const doDerived = await needsDerivedRecalc(existingSchemeId);
-
+          // 1) segmentos: verifica -> recalcula se necessário -> barreira
+          const missingSegBefore = await countMissingSegments(existingSchemeId);
           let recalc = null;
           let derived = null;
-          let summary = null;
 
-          if (doSegments) {
+          if (missingSegBefore > 0) {
             recalc = await recalculateSchemePointsForScheme(existingSchemeId);
-            derived = await updateSchemePointsDerivedFields(existingSchemeId); // força
-          } else if (doDerived) {
+          }
+
+          const missingSegAfter = await countMissingSegments(existingSchemeId);
+          if (missingSegAfter > 0) {
+            throw new Error(
+              `Segments incompletos após recalc: ${missingSegAfter}`
+            );
+          }
+
+          const missingDerBefore = await countMissingDerived(existingSchemeId);
+          if (missingDerBefore > 0) {
             derived = await updateSchemePointsDerivedFields(existingSchemeId);
           }
 
-          if (recalc || derived) {
-            summary = await updateSchemeSummary(existingSchemeId);
+          const missingDerAfter = await countMissingDerived(existingSchemeId);
+          if (missingDerAfter > 0) {
+            throw new Error(
+              `Derived incompletos após update: ${missingDerAfter}`
+            );
           }
+
+          const summary = await updateSchemeSummary(existingSchemeId);
+
+          const repaired = missingSegBefore > 0 || missingDerBefore > 0;
 
           results.push({
             externalKey: scheme.externalKey,
             schemeId: existingSchemeId,
-            status:
-              recalc || derived
-                ? "REPAIRED_EXISTING"
-                : "SKIPPED_ALREADY_EXISTS",
+            status: repaired ? "REPAIRED_EXISTING" : "SKIPPED_ALREADY_EXISTS",
             recalc,
             derived,
             summary,
+            missingSegBefore,
+            missingDerBefore,
           });
 
-          if (!(recalc || derived)) skippedCount++;
+          if (!repaired) skippedCount++;
           continue;
         }
 
@@ -287,8 +332,22 @@ export async function commitImportBatch(params: {
 
         const recalc = await recalculateSchemePointsForScheme(createdSchemeId);
 
+        const missingSegAfter = await countMissingSegments(createdSchemeId);
+        if (missingSegAfter > 0) {
+          throw new Error(
+            `Segments incompletos após recalc: ${missingSegAfter}`
+          );
+        }
+
         // ✅ novos derivados (equivalente ao “recalcAllRoutePoints” do front)
         const derived = await updateSchemePointsDerivedFields(createdSchemeId);
+
+        const missingDerAfter = await countMissingDerived(createdSchemeId);
+        if (missingDerAfter > 0) {
+          throw new Error(
+            `Derived incompletos após update: ${missingDerAfter}`
+          );
+        }
 
         // ✅ header do scheme
         const summary = await updateSchemeSummary(createdSchemeId);

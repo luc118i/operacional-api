@@ -287,9 +287,9 @@ async function updatePointSegmentDistanceAndTime(params: {
     payload.tempo_deslocamento_min = params.durationMin;
   }
 
-  // ✅ persiste link do trecho
+  // ✅ persiste link do trecho (normaliza "" -> null)
   if (params.roadSegmentUuid !== undefined) {
-    payload.road_segment_uuid = params.roadSegmentUuid; // pode ser null
+    payload.road_segment_uuid = params.roadSegmentUuid || null;
   }
 
   const { error } = await supabase
@@ -585,6 +585,17 @@ export async function recalculateSchemePointsForScheme(
 
   await Promise.all(computeJobs);
 
+  // ✅ se qualquer segmento deduplicado não foi calculado, falha
+  const missingKeys: SegmentKey[] = [];
+  for (const [key] of segments.entries()) {
+    if (!results.has(key)) missingKeys.push(key);
+  }
+  if (missingKeys.length > 0) {
+    throw new Error(
+      `[recalc-scheme] ${missingKeys.length} segmentos não calculados (scheme=${schemeId})`
+    );
+  }
+
   let segmentsFromCache = 0;
   let segmentsFallback = 0;
 
@@ -613,13 +624,21 @@ export async function recalculateSchemePointsForScheme(
 
         const key = segmentKey(u.from, u.to);
         const res = results.get(key);
-        if (!res) return;
+        if (!res) {
+          throw new Error(`[recalc-scheme] resultado ausente para key=${key}`);
+        }
+
+        if (!res.roadSegmentUuid) {
+          throw new Error(
+            `[recalc-scheme] roadSegmentUuid ausente para ${u.from}->${u.to} (scheme=${schemeId})`
+          );
+        }
 
         await updatePointSegmentDistanceAndTime({
           pointId: u.pointId,
           distanceKm: res.distanceKm,
           durationMin: res.durationMin,
-          roadSegmentUuid: res.roadSegmentUuid ?? null,
+          roadSegmentUuid: res.roadSegmentUuid, // agora é string garantida
         });
 
         updatedPoints++;
