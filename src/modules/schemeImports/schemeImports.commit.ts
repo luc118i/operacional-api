@@ -49,11 +49,13 @@ async function countMissingDerived(schemeId: string): Promise<number> {
     .from("scheme_points")
     .select("id", { count: "exact", head: true })
     .eq("scheme_id", schemeId)
+    .gt("ordem", 1) // <= alinhar com segments
     .or(
       [
         "distancia_acumulada_km.is.null",
         "chegada_offset_min.is.null",
         "saida_offset_min.is.null",
+        // velocidade_media_kmh: só cobre se sua função realmente preenche sempre
         "velocidade_media_kmh.is.null",
       ].join(",")
     );
@@ -320,15 +322,15 @@ export async function commitImportBatch(params: {
           );
         }
 
-        await setSchemePointsForScheme(
-          createdSchemeId,
-          scheme.points.map((p: any) => ({
-            scheme_id: createdSchemeId,
-            location_id: p.locationId,
-            ordem: p.sequencia,
-            tempo_no_local_min: p.paradaMin ?? 0,
-          }))
-        );
+        const pts = scheme.points.map((p: any, idx: number, arr: any[]) => ({
+          scheme_id: createdSchemeId,
+          location_id: p.locationId,
+          ordem: p.sequencia,
+          tempo_no_local_min: p.paradaMin ?? 0,
+          is_initial: idx === 0,
+          is_final: idx === arr.length - 1,
+        }));
+        await setSchemePointsForScheme(createdSchemeId, pts);
 
         const recalc = await recalculateSchemePointsForScheme(createdSchemeId);
 
