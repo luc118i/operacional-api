@@ -342,7 +342,9 @@ export async function commitImportBatch(params: {
         }
 
         // ✅ novos derivados (equivalente ao “recalcAllRoutePoints” do front)
+        console.log("[COMMIT] calling derived for", createdSchemeId);
         const derived = await updateSchemePointsDerivedFields(createdSchemeId);
+        console.log("[COMMIT] derived result", { createdSchemeId, derived });
 
         const missingDerAfter = await countMissingDerived(createdSchemeId);
         if (missingDerAfter > 0) {

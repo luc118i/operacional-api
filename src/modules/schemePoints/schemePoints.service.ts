@@ -674,6 +674,8 @@ export async function recalculateSchemePointsForScheme(
  * saida_offset do ponto i = chegada_offset + tempo_no_local_min(i)
  */
 export async function updateSchemePointsDerivedFields(schemeId: string) {
+  console.log("[DERIVED] recalculating derived for scheme", schemeId);
+
   const { data, error } = await supabase
     .from("scheme_points")
     .select(
@@ -772,6 +774,27 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
 
     updated++;
   }
+
+  const check = await supabase
+    .from("scheme_points")
+    .select(
+      "id, ordem, distancia_acumulada_km, chegada_offset_min, saida_offset_min"
+    )
+    .eq("scheme_id", schemeId)
+    .order("ordem", { ascending: true })
+    .limit(3);
+
+  console.log("[DERIVED] after update sample", check.data);
+
+  const { count } = await supabase
+    .from("scheme_points")
+    .select("id", { count: "exact", head: true })
+    .eq("scheme_id", schemeId)
+    .or(
+      "distancia_acumulada_km.is.null,chegada_offset_min.is.null,saida_offset_min.is.null"
+    );
+
+  console.log("[DERIVED] missing after update =", count);
 
   return { updated };
 }
