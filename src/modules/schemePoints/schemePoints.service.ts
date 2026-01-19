@@ -207,13 +207,17 @@ export async function setSchemePointsForScheme(
 ): Promise<SchemePoint[]> {
   // segurança: garantir que todos têm o mesmo scheme_id
   const normalizedPoints = points.map((p, index) => {
+    const ordem =
+      typeof p.ordem === "number" && Number.isFinite(p.ordem) && p.ordem > 0
+        ? p.ordem
+        : index + 1;
+
     const normalized = normalizeSchemePointInput({
       ...p,
       scheme_id: schemeId,
-      ordem:
-        typeof p.ordem === "number" && Number.isFinite(p.ordem) && p.ordem > 0
-          ? p.ordem
-          : index + 1,
+      ordem,
+      is_initial: index === 0,
+      is_final: index === points.length - 1,
     } as any);
 
     const { functions, ...dbPayload } = normalized as any;
@@ -280,14 +284,10 @@ async function updatePointSegmentDistanceAndTime(params: {
 }) {
   const payload: any = {
     distancia_km: params.distanceKm,
+    tempo_deslocamento_min: params.durationMin ?? 0,
     updated_at: new Date().toISOString(),
   };
 
-  if (params.durationMin !== null && params.durationMin !== undefined) {
-    payload.tempo_deslocamento_min = params.durationMin;
-  }
-
-  // ✅ persiste link do trecho (normaliza "" -> null)
   if (params.roadSegmentUuid !== undefined) {
     payload.road_segment_uuid = params.roadSegmentUuid || null;
   }
