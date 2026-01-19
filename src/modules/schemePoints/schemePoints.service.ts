@@ -719,7 +719,7 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
       continue;
     }
 
-    const dist = toNumber(p.distancia_km);
+    const dist = toNumber(p.distancia_km) ?? 0;
     const drive = p.tempo_deslocamento_min ?? 0;
     const stop = p.tempo_no_local_min ?? 0;
 
@@ -742,31 +742,36 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
     prevSaidaOffset = saida;
   }
 
-  // Persistência em lote (mais rápido e detecta RLS via contagem)
-  const payload = updates.map((u) => ({
-    id: u.id,
-    distancia_acumulada_km: u.distancia_acumulada_km,
-    velocidade_media_kmh: u.velocidade_media_kmh,
-    chegada_offset_min: u.chegada_offset_min,
-    saida_offset_min: u.saida_offset_min,
-    updated_at: new Date().toISOString(),
-  }));
+  // Persistência determinística (UPDATE por linha)
 
-  const { data: rows, error: err } = await supabase
-    .from("scheme_points")
-    .upsert(payload, { onConflict: "id" })
-    .select("id");
+  let updated = 0;
 
-  if (err) throw err;
+  for (const u of updates) {
+    const { data: rows, error: upErr } = await supabase
+      .from("scheme_points")
+      .update({
+        distancia_acumulada_km: u.distancia_acumulada_km,
+        velocidade_media_kmh: u.velocidade_media_kmh,
+        chegada_offset_min: u.chegada_offset_min,
+        saida_offset_min: u.saida_offset_min,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", u.id)
+      .select("id"); // FORÇA retorno
 
-  // ✅ Se RLS/policy bloquear, o supabase pode "não atualizar" sem erro; detectamos aqui
-  if (!rows || rows.length !== payload.length) {
-    throw new Error(
-      `[derived] upsert afetou ${rows?.length ?? 0}/${
-        payload.length
-      } linhas (provável RLS/policy)`
-    );
+    if (upErr) throw upErr;
+
+    // 🔴 se não afetou exatamente 1 linha, falha
+    if (!rows || rows.length !== 1) {
+      throw new Error(
+        `[derived] UPDATE não afetou linha id=${u.id} (afetadas=${
+          rows?.length ?? 0
+        })`
+      );
+    }
+
+    updated++;
   }
 
-  return { updated: rows.length };
+  return { updated };
 }
