@@ -16,7 +16,7 @@ import {
 } from "./schemePoints.functions";
 
 type PLimitFn = (
-  concurrency: number
+  concurrency: number,
 ) => <T>(fn: () => Promise<T>) => Promise<T>;
 
 type PointRow = {
@@ -66,7 +66,7 @@ export async function getAllSchemePoints(): Promise<SchemePoint[]> {
  * Busca um ponto específico pelo ID.
  */
 export async function getSchemePointById(
-  id: string
+  id: string,
 ): Promise<SchemePoint | null> {
   const { data, error } = await supabase
     .from("scheme_points")
@@ -90,7 +90,7 @@ export async function getSchemePointById(
  * Busca todos os pontos de um esquema, ordenados pela ordem.
  */
 export async function getSchemePointsBySchemeId(
-  schemeId: string
+  schemeId: string,
 ): Promise<SchemePoint[]> {
   const { data, error } = await supabase
     .from("scheme_points")
@@ -107,7 +107,7 @@ export async function getSchemePointsBySchemeId(
         tipo,
         sigla
       )
-    `
+    `,
     )
     .eq("scheme_id", schemeId)
     .order("ordem", { ascending: true });
@@ -124,7 +124,7 @@ export async function getSchemePointsBySchemeId(
  * Cria um único ponto.
  */
 export async function createSchemePoint(
-  input: CreateSchemePointInput
+  input: CreateSchemePointInput,
 ): Promise<SchemePoint> {
   // ✅ 1) normaliza: functions -> flags (ou legado)
   const normalized = normalizeSchemePointInput(input);
@@ -152,7 +152,7 @@ export async function createSchemePoint(
  */
 export async function updateSchemePoint(
   id: string,
-  input: UpdateSchemePointInput
+  input: UpdateSchemePointInput,
 ): Promise<SchemePoint | null> {
   // ✅ 1) normaliza
   const normalized = normalizeSchemePointInput(input);
@@ -203,7 +203,7 @@ export async function deleteSchemePoint(id: string): Promise<boolean> {
  */
 export async function setSchemePointsForScheme(
   schemeId: string,
-  points: CreateSchemePointInput[]
+  points: CreateSchemePointInput[],
 ): Promise<SchemePoint[]> {
   // segurança: garantir que todos têm o mesmo scheme_id
   const normalizedPoints = points.map((p, index) => {
@@ -233,7 +233,7 @@ export async function setSchemePointsForScheme(
   if (deleteError) {
     console.error(
       "[setSchemePointsForScheme] erro ao limpar pontos antigos:",
-      deleteError
+      deleteError,
     );
     throw new Error("Erro ao limpar pontos anteriores do esquema operacional");
   }
@@ -252,7 +252,7 @@ export async function setSchemePointsForScheme(
   if (insertError) {
     console.error(
       "[setSchemePointsForScheme] erro ao inserir novos pontos:",
-      insertError
+      insertError,
     );
     throw new Error("Erro ao salvar pontos do esquema operacional");
   }
@@ -433,7 +433,7 @@ export async function recalculateSchemePointsByLocation(locationId: string) {
         errorsCount++;
         console.error("[recalc] erro ao calcular segmento:", { key, e });
       }
-    })
+    }),
   );
 
   await Promise.all(computeJobs);
@@ -473,7 +473,7 @@ export async function recalculateSchemePointsByLocation(locationId: string) {
           e,
         });
       }
-    })
+    }),
   );
 
   await Promise.all(updateJobs);
@@ -498,7 +498,7 @@ export async function recalculateSchemePointsByLocation(locationId: string) {
  */
 export async function recalculateSchemePointsForScheme(
   schemeId: string,
-  opts?: { calcConcurrency?: number; updateConcurrency?: number }
+  opts?: { calcConcurrency?: number; updateConcurrency?: number },
 ) {
   const pLimit = await getPLimit();
   const calcLimit = pLimit(opts?.calcConcurrency ?? 3);
@@ -580,7 +580,7 @@ export async function recalculateSchemePointsForScheme(
         errorsCount++;
         console.error("[recalc-scheme] erro ao calcular segmento:", { key, e });
       }
-    })
+    }),
   );
 
   await Promise.all(computeJobs);
@@ -592,7 +592,7 @@ export async function recalculateSchemePointsForScheme(
   }
   if (missingKeys.length > 0) {
     throw new Error(
-      `[recalc-scheme] ${missingKeys.length} segmentos não calculados (scheme=${schemeId})`
+      `[recalc-scheme] ${missingKeys.length} segmentos não calculados (scheme=${schemeId})`,
     );
   }
 
@@ -604,8 +604,16 @@ export async function recalculateSchemePointsForScheme(
     if (r.source === "fallback") segmentsFallback++;
   }
 
-  // 3) Aplicar updates nos points
+  // 3) Aplicar updates nos points (fail-fast + verificação determinística)
   let updatedPoints = 0;
+
+  const updateErrors: Array<{
+    pointId: string;
+    ordem: number;
+    from: string;
+    to: string;
+    message: string;
+  }> = [];
 
   const updateJobs = updates.map((u) =>
     updateLimit(async () => {
@@ -630,7 +638,7 @@ export async function recalculateSchemePointsForScheme(
 
         if (!res.roadSegmentUuid) {
           throw new Error(
-            `[recalc-scheme] roadSegmentUuid ausente para ${u.from}->${u.to} (scheme=${schemeId})`
+            `[recalc-scheme] roadSegmentUuid ausente para ${u.from}->${u.to} (scheme=${schemeId})`,
           );
         }
 
@@ -638,28 +646,46 @@ export async function recalculateSchemePointsForScheme(
           pointId: u.pointId,
           distanceKm: res.distanceKm,
           durationMin: res.durationMin,
-          roadSegmentUuid: res.roadSegmentUuid, // agora é string garantida
+          roadSegmentUuid: res.roadSegmentUuid,
         });
 
         updatedPoints++;
-      } catch (e) {
-        errorsCount++;
-        console.error("[recalc-scheme] erro ao atualizar scheme_point:", {
+      } catch (e: any) {
+        const message = String(e?.message ?? e);
+        updateErrors.push({
           pointId: u.pointId,
-          e,
+          ordem: u.ordem,
+          from: u.from,
+          to: u.to,
+          message,
         });
       }
-    })
+    }),
   );
 
   await Promise.all(updateJobs);
+
+  // ✅ barreira determinística: se qualquer falhou, estoura com contexto
+  if (updateErrors.length > 0) {
+    console.error("[recalc-scheme] updateErrors", updateErrors.slice(0, 5));
+    throw new Error(
+      `[recalc-scheme] ${updateErrors.length} updates falharam (scheme=${schemeId}). Ex: pointId=${updateErrors[0].pointId}, ordem=${updateErrors[0].ordem}, ${updateErrors[0].from}->${updateErrors[0].to}: ${updateErrors[0].message}`,
+    );
+  }
+
+  // ✅ segunda barreira: garante que atualizou TUDO que era esperado
+  if (updatedPoints !== updates.length) {
+    throw new Error(
+      `[recalc-scheme] updatedPoints=${updatedPoints}/${updates.length} (scheme=${schemeId})`,
+    );
+  }
 
   return {
     updatedPoints,
     segmentsComputed: segments.size,
     segmentsFromCache,
     segmentsFallback,
-    errorsCount,
+    errorsCount: 0,
   };
 }
 
@@ -674,12 +700,10 @@ export async function recalculateSchemePointsForScheme(
  * saida_offset do ponto i = chegada_offset + tempo_no_local_min(i)
  */
 export async function updateSchemePointsDerivedFields(schemeId: string) {
-  console.log("[DERIVED] recalculating derived for scheme", schemeId);
-
   const { data, error } = await supabase
     .from("scheme_points")
     .select(
-      "id, ordem, distancia_km, tempo_deslocamento_min, tempo_no_local_min"
+      "id, ordem, distancia_km, tempo_deslocamento_min, tempo_no_local_min",
     )
     .eq("scheme_id", schemeId)
     .order("ordem", { ascending: true });
@@ -768,7 +792,7 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
       throw new Error(
         `[derived] UPDATE não afetou linha id=${u.id} (afetadas=${
           rows?.length ?? 0
-        })`
+        })`,
       );
     }
 
@@ -778,23 +802,19 @@ export async function updateSchemePointsDerivedFields(schemeId: string) {
   const check = await supabase
     .from("scheme_points")
     .select(
-      "id, ordem, distancia_acumulada_km, chegada_offset_min, saida_offset_min"
+      "id, ordem, distancia_acumulada_km, chegada_offset_min, saida_offset_min",
     )
     .eq("scheme_id", schemeId)
     .order("ordem", { ascending: true })
     .limit(3);
-
-  console.log("[DERIVED] after update sample", check.data);
 
   const { count } = await supabase
     .from("scheme_points")
     .select("id", { count: "exact", head: true })
     .eq("scheme_id", schemeId)
     .or(
-      "distancia_acumulada_km.is.null,chegada_offset_min.is.null,saida_offset_min.is.null"
+      "distancia_acumulada_km.is.null,chegada_offset_min.is.null,saida_offset_min.is.null",
     );
-
-  console.log("[DERIVED] missing after update =", count);
 
   return { updated };
 }

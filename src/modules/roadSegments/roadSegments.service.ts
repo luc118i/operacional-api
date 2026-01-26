@@ -314,7 +314,8 @@ export async function getOrCreateRoadSegmentDistanceKm(
       return {
         roadSegmentUuid: uuid,
         distanceKm: dist!,
-        durationMin: toNumber(seg.duration_min),
+        durationMin: toNumber(seg.duration_min) ?? 0,
+
         cached: true,
         source: "db",
       };
@@ -373,12 +374,26 @@ export async function getOrCreateRoadSegmentDistanceKm(
         throw new Error("Locais sem coordenadas válidas (lat/lng).");
       }
 
-      // 3) ORS → fallback (aqui lock=true, então pode usar ORS se tiver key)
+      // 3) ORS → fallback (com duração estimada no fallback)
       let distanceKm: number;
       let durationMin: number | null = null;
       let calcSource: "ors" | "fallback" = "fallback";
 
       const apiKey = process.env.ORS_API_KEY;
+
+      // velocidade média (km/h) para estimar duração quando não houver ORS
+      const FALLBACK_SPEED_KMH = Number(process.env.FALLBACK_SPEED_KMH ?? 60);
+
+      const estimateDurationMin = (km: number): number => {
+        if (!Number.isFinite(km) || km <= 0) return 0;
+        const speed =
+          Number.isFinite(FALLBACK_SPEED_KMH) && FALLBACK_SPEED_KMH > 0
+            ? FALLBACK_SPEED_KMH
+            : 60;
+
+        const minutes = Math.round((km / speed) * 60);
+        return Math.max(1, minutes); // mínimo 1 min para trechos > 0
+      };
 
       if (apiKey) {
         try {
@@ -389,15 +404,20 @@ export async function getOrCreateRoadSegmentDistanceKm(
             toLng,
             toLat
           );
+
           distanceKm = ors.distanceKm;
-          durationMin = ors.durationMin;
+          durationMin = ors.durationMin ?? estimateDurationMin(distanceKm);
           calcSource = "ors";
         } catch (e: any) {
           console.error("[ORS] falhou, usando fallback:", e?.ors);
           distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
+          durationMin = estimateDurationMin(distanceKm);
+          calcSource = "fallback";
         }
       } else {
         distanceKm = haversineDistanceKm(fromLat, fromLng, toLat, toLng);
+        durationMin = estimateDurationMin(distanceKm);
+        calcSource = "fallback";
       }
 
       // 5) Upsert (lock=true => sempre persiste)
