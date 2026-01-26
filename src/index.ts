@@ -31,10 +31,6 @@ if (process.env.FRONTEND_URL) {
   allowedOrigins.push(process.env.FRONTEND_URL);
 }
 
-app.use((req, _res, next) => {
-
-});
-
 app.use(
   cors({
     origin: allowedOrigins,
@@ -72,8 +68,6 @@ app.post("/debug/derived/:schemeId", async (req, res) => {
       .eq("scheme_id", schemeId);
 
     if (error) throw error;
-
-    
 
     const result = await updateSchemePointsDerivedFields(schemeId);
 
